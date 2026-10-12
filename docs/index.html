@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>
+:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}
+img{max-width:100%}
+[hidden]:not([hidden="until-found"]){display:none!important}
+</style>
+<title>Kafka Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@500;700;900&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: sticky module rail on the left, single reading column ~68ch on the right; stacks to one column under 900px */
+:root{
+  --paper:#F2F3EF; --panel:#FBFBF9; --sunk:#E8EAE4;
+  --ink:#1A1D21; --ink-2:#3C434B; --muted:#6B737C;
+  --rule:#D5D8D1; --rule-strong:#B9BEB6;
+  --accent:#1D6B61; --accent-soft:#DCE9E6;
+  --warn:#9E4B18; --warn-soft:#F2E3D8;
+  --font-display:"Chivo","Helvetica Neue",Arial,sans-serif;
+  --font-body:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#15171A; --panel:#1C1F23; --sunk:#23272C;
+  --ink:#E9EBE6; --ink-2:#C3C9CE; --muted:#929AA2;
+  --rule:#2C3137; --rule-strong:#3D444B;
+  --accent:#58B6A7; --accent-soft:#1B312E;
+  --warn:#D98B52; --warn-soft:#33241A;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --paper:#15171A; --panel:#1C1F23; --sunk:#23272C;
+  --ink:#E9EBE6; --ink-2:#C3C9CE; --muted:#929AA2;
+  --rule:#2C3137; --rule-strong:#3D444B;
+  --accent:#58B6A7; --accent-soft:#1B312E;
+  --warn:#D98B52; --warn-soft:#33241A;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:17px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+.shell{display:grid; grid-template-columns:260px minmax(0,1fr); gap:0; max-width:1180px; margin:0 auto}
+
+.rail{
+  border-right:1px solid var(--rule);
+  padding:28px 20px 48px; align-self:start;
+  position:sticky; top:env(safe-area-inset-top,0px);
+  max-height:100vh; overflow-y:auto;
+}
+.brand{font-family:var(--font-display); font-weight:900; font-size:19px; letter-spacing:-.02em; line-height:1.15; margin:0 0 2px}
+.brand span{color:var(--accent)}
+.brand-sub{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:0 0 22px}
+.rail h3{font-family:var(--font-mono); font-size:10px; letter-spacing:.11em; text-transform:uppercase; color:var(--muted); margin:22px 0 8px; font-weight:600}
+.rail nav{display:flex; flex-direction:column; gap:1px}
+.rail nav a{
+  display:flex; gap:9px; align-items:baseline;
+  font-family:var(--font-display); font-size:13.5px; font-weight:500;
+  color:var(--ink-2); text-decoration:none; padding:5px 8px; border-radius:3px; min-width:0;
+}
+.rail nav a:hover{background:var(--sunk); color:var(--ink)}
+.rail nav a .n{font-family:var(--font-mono); font-size:10.5px; color:var(--muted); flex:0 0 22px; font-weight:500}
+.rail nav a.done .n{color:var(--accent)}
+.rail nav a.todo{color:var(--muted)}
+.rail nav a.todo .n{opacity:.6}
+.legend{font-family:var(--font-mono); font-size:10px; color:var(--muted); margin-top:20px; line-height:1.9; border-top:1px solid var(--rule); padding-top:14px}
+.legend b{color:var(--accent); font-weight:500}
+.repo-link{font-family:var(--font-mono); font-size:10px; margin-top:12px}
+
+main{padding:40px 44px 96px; min-width:0}
+.eyebrow{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.11em; text-transform:uppercase; color:var(--accent); font-weight:600; margin:0 0 10px}
+h1{font-family:var(--font-display); font-weight:900; font-size:clamp(30px,4.6vw,44px); line-height:1.06; letter-spacing:-.025em; margin:0 0 14px; text-wrap:balance}
+.lede{font-size:19px; color:var(--ink-2); max-width:62ch; margin:0 0 8px}
+h2{font-family:var(--font-display); font-weight:700; font-size:25px; letter-spacing:-.015em; margin:56px 0 4px; padding-top:22px; border-top:2px solid var(--ink); text-wrap:balance}
+h3{font-family:var(--font-display); font-weight:700; font-size:18px; letter-spacing:-.01em; margin:34px 0 6px; text-wrap:balance}
+p{margin:10px 0; max-width:68ch}
+a{color:var(--accent)}
+code{font-family:var(--font-mono); font-size:.86em; background:var(--sunk); padding:1.5px 5px; border-radius:3px}
+strong{font-weight:600}
+ul,ol{max-width:68ch; padding-left:22px; margin:10px 0}
+li{margin:5px 0}
+hr{border:0; border-top:1px solid var(--rule); margin:40px 0}
+
+.scroll{overflow-x:auto; margin:18px 0; border:1px solid var(--rule); border-radius:5px; background:var(--panel)}
+table{border-collapse:collapse; width:100%; font-size:14.5px; font-family:var(--font-display)}
+th,td{text-align:left; padding:9px 13px; border-bottom:1px solid var(--rule); vertical-align:top}
+thead th{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); font-weight:600; background:var(--sunk); white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+td code{background:transparent; padding:0; color:var(--accent)}
+.num{font-variant-numeric:tabular-nums; font-family:var(--font-mono)}
+
+pre{
+  font-family:var(--font-mono); font-size:13px; line-height:1.62;
+  background:var(--panel); border:1px solid var(--rule); border-left:2px solid var(--accent);
+  border-radius:4px; padding:14px 16px; overflow-x:auto; margin:16px 0; color:var(--ink-2);
+}
+pre b{color:var(--ink); font-weight:600}
+pre .c{color:var(--muted)}
+
+.callout{border:1px solid var(--rule); border-left:3px solid var(--accent); background:var(--panel); border-radius:4px; padding:14px 18px; margin:20px 0}
+.callout.warn{border-left-color:var(--warn); background:var(--warn-soft)}
+.callout .tag{font-family:var(--font-mono); font-size:10px; letter-spacing:.09em; text-transform:uppercase; font-weight:600; color:var(--accent); display:block; margin-bottom:5px}
+.callout.warn .tag{color:var(--warn)}
+.callout p{margin:5px 0; max-width:62ch}
+.callout :first-child{margin-top:0} .callout :last-child{margin-bottom:0}
+
+.logstrip{display:flex; flex-direction:column; gap:7px; margin:20px 0; font-family:var(--font-mono); font-size:11.5px}
+.logrow{display:flex; align-items:center; gap:9px; min-width:0}
+.logrow .plabel{flex:0 0 72px; color:var(--muted); letter-spacing:.04em}
+.cells{display:flex; gap:3px; flex-wrap:wrap; min-width:0}
+.cell{width:30px; height:26px; display:grid; place-items:center; background:var(--sunk); border:1px solid var(--rule); border-radius:2px; color:var(--ink-2); font-size:10.5px; font-variant-numeric:tabular-nums}
+.cell.hw{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600}
+.cell.empty{background:transparent; border-style:dashed; color:transparent}
+.logrow .owner{flex:0 0 auto; color:var(--accent); font-size:10.5px; letter-spacing:.04em}
+.logrow .owner.idle{color:var(--warn)}
+
+.tool{border:1px solid var(--rule-strong); border-radius:6px; background:var(--panel); padding:20px; margin:24px 0}
+.tool-head{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); font-weight:600; margin-bottom:14px}
+.fields{display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end}
+.field{display:flex; flex-direction:column; gap:5px; min-width:0}
+.field label{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted)}
+.field input{
+  font-family:var(--font-mono); font-size:14px; padding:7px 10px; width:150px; max-width:100%;
+  background:var(--paper); color:var(--ink); border:1px solid var(--rule-strong); border-radius:3px;
+}
+.field input:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+.field input[type=number]{width:90px}
+.result{margin-top:18px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; font-family:var(--font-mono); font-size:13px}
+.chip{border:1px solid var(--rule-strong); border-radius:3px; padding:6px 11px; background:var(--paper); font-variant-numeric:tabular-nums}
+.chip b{color:var(--accent); font-weight:600}
+.verdict{font-family:var(--font-display); font-size:14px; font-weight:500; margin-top:12px}
+.verdict.moved{color:var(--warn)}
+.verdict.kept{color:var(--accent)}
+
+.qlist{list-style:none; padding:0; margin:18px 0; max-width:none}
+.qlist li{border:1px solid var(--rule); border-radius:5px; background:var(--panel); margin:7px 0; padding:0}
+.qlist label{display:flex; gap:12px; align-items:flex-start; padding:12px 15px; cursor:pointer}
+.qlist input{margin:4px 0 0; accent-color:var(--accent); flex:0 0 auto; width:15px; height:15px}
+.qlist .qtext{font-size:15.5px; min-width:0}
+.qlist .lvl{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); display:block; margin-bottom:3px}
+.qlist .lvl.hard{color:var(--warn)}
+.qlist input:checked + .qtext{color:var(--muted); text-decoration:line-through var(--rule-strong)}
+.qmeta{font-family:var(--font-mono); font-size:11px; color:var(--muted); margin-top:10px}
+
+@media (max-width:900px){
+  .shell{grid-template-columns:minmax(0,1fr)}
+  .rail{position:static; max-height:none; border-right:0; border-bottom:1px solid var(--rule); padding:26px 20px 22px}
+  .rail nav{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:1px}
+  main{padding:30px 20px 80px}
+  body{font-size:16px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+</style>
+</head>
+<body>
+<div class="shell">
+<aside class="rail">
+  <p class="brand">Kafka <span>Deep</span> Dive</p>
+  <p class="brand-sub">Kafka 4.x · senior prep</p>
+
+  <h3>Covered</h3>
+  <nav>
+    <a class="done" href="#roadmap"><span class="n">—</span><span>Roadmap</span></a>
+    <a class="done" href="#m1"><span class="n">01</span><span>Positioning &amp; core concepts</span></a>
+    <a class="done" href="#calc"><span class="n">↳</span><span>Partition calculator</span></a>
+    <a class="done" href="#lab"><span class="n">↳</span><span>Lab 01</span></a>
+    <a class="done" href="#questions"><span class="n">↳</span><span>Interview questions</span></a>
+  </nav>
+
+  <h3>Next up</h3>
+  <nav>
+    <a class="todo" href="#roadmap"><span class="n">M2</span><span>Storage internals</span></a>
+    <a class="todo" href="#roadmap"><span class="n">M3</span><span>Replication &amp; ISR</span></a>
+    <a class="todo" href="#roadmap"><span class="n">M4</span><span>KRaft</span></a>
+    <a class="todo" href="#roadmap"><span class="n">M5</span><span>Producer</span></a>
+    <a class="todo" href="#roadmap"><span class="n">M6</span><span>Consumer</span></a>
+    <a class="todo" href="#roadmap"><span class="n">M7</span><span>Transactions</span></a>
+  </nav>
+
+  <p class="legend"><b>●</b> covered &nbsp;·&nbsp; ○ pending<br>Updated after each session.</p>
+</aside>
+
+<main>
+  <p class="eyebrow">Session 1 · M0 + M1</p>
+  <h1>Positioning Kafka &amp; core concepts</h1>
+  <p class="lede">The foundation session. Most wrong answers in a Kafka interview do not come from missing deep knowledge — they come from a broken mental model at this level.</p>
+  <p class="qmeta">Targets Apache Kafka 4.x (KRaft-only). Latest release as of 09/2026: 4.3.x.</p>
+
+  <h2 id="roadmap">Roadmap — 14 modules</h2>
+  <p>Every module runs the same four steps: walkthrough → this page → hands-on lab → graded question set. Questions are tiered <em>Junior → Mid → Senior</em>; senior answers get written out and graded against <em>missing the point / correct but shallow / senior level</em>.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Part</th><th>Module</th><th>Core content</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="3">A · Foundations</td><td class="num">M0</td><td>Kafka as a commit log; RabbitMQ / Pulsar / SQS comparison; when not to use it; Share Groups</td><td><code>done</code></td></tr>
+      <tr><td class="num">M1</td><td>Topic, partition, offset, replica, consumer group, ordering guarantees</td><td><code>done</code></td></tr>
+      <tr><td class="num">M2</td><td>Log segments, indexes, page cache, zero-copy, retention, compaction, tiered storage</td><td>next</td></tr>
+      <tr><td rowspan="2">B · Core mechanics</td><td class="num">M3</td><td>Replication, ISR, LEO vs high watermark, unclean leader election, data-loss matrix</td><td>—</td></tr>
+      <tr><td class="num">M4</td><td>KRaft: quorum controller, metadata log, why ZooKeeper had to go</td><td>—</td></tr>
+      <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td>—</td></tr>
+      <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td>—</td></tr>
+      <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td>—</td></tr>
+      <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td>—</td></tr>
+      <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td>—</td></tr>
+      <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td>—</td></tr>
+      <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td>—</td></tr>
+      <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td>—</td></tr>
+      <tr><td class="num">M13</td><td>Mock interview, rapid-fire, incident scenarios, senior rubric</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2 id="m1">One definition, derive everything else from it</h2>
+
+  <div class="callout">
+    <span class="tag">Mental model</span>
+    <p>Kafka is a <strong>distributed, replicated, append-only commit log</strong> in which the broker is only responsible for storing and serving the log, while <strong>the read position is owned by the consumer</strong>.</p>
+  </div>
+
+  <p>This is the one thing worth memorising. Every characteristic property of Kafka follows from it, so in an interview you can derive the answer on the spot instead of reciting it.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Because Kafka is a log and consumers own their offsets</th><th>It follows that</th></tr></thead>
+    <tbody>
+      <tr><td>The broker keeps no per-message state</td><td>Very high throughput; the broker does almost nothing but sequential I/O</td></tr>
+      <tr><td>Reading is non-destructive</td><td>Many consumer groups read the same data independently; <strong>replay</strong> is free</td></tr>
+      <tr><td>Data is deleted by <strong>retention policy</strong>, not by consumption</td><td>Keep 7 days, a year, or forever via compaction / tiered storage</td></tr>
+      <tr><td>There is no per-message ack at the broker</td><td><strong>No</strong> per-message retry, delay, priority or selective nack</td></tr>
+      <tr><td>Order only exists inside one log file</td><td>Order is guaranteed <strong>within a partition</strong> only</td></tr>
+      <tr><td>Nothing is indexed by content</td><td>You cannot ask for “messages where status=FAILED” — that is a database's job</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>How it compares</h3>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Kafka</th><th>RabbitMQ</th><th>Pulsar</th><th>SQS</th></tr></thead>
+    <tbody>
+      <tr><td>Model</td><td>Log, consumer owns offset</td><td>Queue, broker owns per-message state</td><td>Log, storage split from compute (BookKeeper)</td><td>Managed queue, visibility timeout</td></tr>
+      <tr><td>After consumption</td><td>Data stays</td><td>Message is removed on ack</td><td>Data stays, removed by retention</td><td>Removed on delete</td></tr>
+      <tr><td>Replay</td><td>Native (reset offsets)</td><td>No</td><td>Native</td><td>No</td></tr>
+      <tr><td>Ordering</td><td>Per partition</td><td>Per queue, easily lost once consumers scale out</td><td>Per partition / per key</td><td>Standard: none · FIFO: per message group</td></tr>
+      <tr><td>Broker-side routing</td><td>None</td><td>Very strong (exchanges, topic, headers)</td><td>Yes</td><td>None</td></tr>
+      <tr><td>Per-message retry / delay</td><td>No (build it yourself)</td><td>Built in (DLX, TTL, delayed exchange)</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Throughput</td><td>Very high</td><td>Moderate</td><td>High</td><td>Moderate, managed</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout">
+    <span class="tag">Answering “Kafka or RabbitMQ?”</span>
+    <p>Do not compare throughput. Compare the <strong>unit of state</strong>: Kafka tracks state as <em>a stream plus an offset</em>, RabbitMQ tracks it <em>per message</em>. If the problem needs control over individual messages — its own retry, its own delay, its own priority — you are fighting Kafka's design. If the problem needs one event stream that several consumers share and can replay, the opposite holds.</p>
+  </div>
+
+  <h3>When not to use Kafka</h3>
+  <ol>
+    <li><strong>Low-latency request/reply.</strong> Kafka is not RPC — use gRPC or HTTP.</li>
+    <li><strong>A task queue with per-task retry, delay and priority</strong> and a worker count that swings widely — RabbitMQ, SQS or Celery fit more naturally.</li>
+    <li><strong>Fan-out to end clients</strong> (mobile, browser, millions of connections). Kafka is not client-facing; it sits behind a WebSocket or push layer.</li>
+    <li><strong>Small scale, one consumer, no replay needed.</strong> Postgres with an outbox table, or a Redis stream, costs far less to operate.</li>
+    <li><strong>Querying by message content</strong>, or updating or deleting one specific message. That is a database.</li>
+    <li><strong>Scheduled or delayed delivery.</strong> Kafka has none natively — you would build tiered delay topics or an external scheduler.</li>
+  </ol>
+
+  <h3>Share Groups (KIP-932) — the 2026 talking point</h3>
+  <p>Share Groups reached production-ready status in Kafka 4.2. Interviews have started asking about this and many candidates have not caught up.</p>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Consumer group</th><th>Share group</th></tr></thead>
+    <tbody>
+      <tr><td>Consumers reading one partition</td><td>Exactly one</td><td><strong>Many</strong></td></tr>
+      <tr><td>Unit of progress</td><td>An offset — a single cursor</td><td><strong>Per-record state</strong>: acquired / acknowledged / released</td></tr>
+      <tr><td>Parallelism ceiling</td><td>Partition count</td><td>Not bounded by partition count</td></tr>
+      <tr><td>Per-record redelivery</td><td>No</td><td>Yes, with a delivery count</td></tr>
+      <tr><td>Ordering</td><td>Yes (per partition)</td><td><strong>Given up</strong> — this is the trade</td></tr>
+    </tbody>
+  </table></div>
+  <p>A senior-level answer to “can Kafka replace RabbitMQ yet?”: <em>much closer since 4.2, but it still lacks broker-side routing and delayed delivery, and Share Groups trade ordering away to get parallelism.</em></p>
+
+  <h2>A partition is the unit of four things at once</h2>
+  <p>A <strong>topic</strong> is purely logical — just a name; no file on disk is named after it. The <strong>partition</strong> is the real object: one log on disk, and simultaneously the unit of</p>
+  <ol>
+    <li>parallelism</li>
+    <li>ordering</li>
+    <li>replication</li>
+    <li>storage and retention</li>
+  </ol>
+  <p>Being able to say “a partition is the unit of all four” already separates you from the average candidate. A single partition <strong>cannot scale past one broker</strong>, which is why partition count is your parallelism ceiling and has to be chosen when the topic is created.</p>
+  <p>An <strong>offset</strong> is a monotonically increasing integer <em>scoped to one partition</em>. There is no topic-wide offset. A record is uniquely identified by <code>(topic, partition, offset)</code>.</p>
+
+  <h3>The assignment rule inside a consumer group</h3>
+  <p>Within one group, each partition is assigned to <strong>exactly one</strong> consumer. Three partitions, four consumers:</p>
+
+  <div class="logstrip">
+    <div class="logrow"><span class="plabel">part 0</span><span class="cells"><span class="cell">0</span><span class="cell">1</span><span class="cell">2</span><span class="cell">3</span><span class="cell hw">4</span><span class="cell empty">5</span></span><span class="owner">→ c1</span></div>
+    <div class="logrow"><span class="plabel">part 1</span><span class="cells"><span class="cell">0</span><span class="cell">1</span><span class="cell hw">2</span><span class="cell empty">3</span><span class="cell empty">4</span><span class="cell empty">5</span></span><span class="owner">→ c2</span></div>
+    <div class="logrow"><span class="plabel">part 2</span><span class="cells"><span class="cell">0</span><span class="cell">1</span><span class="cell">2</span><span class="cell">3</span><span class="cell">4</span><span class="cell hw">5</span></span><span class="owner">→ c3</span></div>
+    <div class="logrow"><span class="plabel">—</span><span class="cells"><span class="cell empty">0</span></span><span class="owner idle">c4 · idle, no partition assigned</span></div>
+  </div>
+
+  <p>So the number of useful consumers in a group is <strong>at most the partition count</strong>. Separate groups read the same topic completely independently, each with its own offsets stored in the internal <code>__consumer_offsets</code> topic. Groups serve both shapes — queue (consumers in one group split the work) and pub/sub (several groups read the same data) — with no separate exchange concept.</p>
+
+  <h3>Reading the output of describe</h3>
+<pre><span class="c">$ kafka-topics.sh --describe --topic lab01.orders</span>
+Topic: lab01.orders  Partition: 0  <b>Leader: 2</b>  <b>Replicas: 2,3,1</b>  <b>Isr: 2,3,1</b>
+Topic: lab01.orders  Partition: 1  Leader: 3  Replicas: 3,1,2  Isr: 3,1,2
+Topic: lab01.orders  Partition: 2  Leader: 1  Replicas: 1,2,3  Isr: 1,2,3</pre>
+  <ul>
+    <li><code>Leader</code> — the only broker that serves reads and writes for that partition. Leaders spread across the three brokers is exactly how Kafka scales writes.</li>
+    <li><code>Replicas</code> — the replica list in preference order; the first entry is the <strong>preferred leader</strong>.</li>
+    <li><code>Isr</code> — in-sync replicas. <code>Isr</code> equal to <code>Replicas</code> means a healthy cluster; a shorter <code>Isr</code> means a follower has fallen behind (M3 digs into this).</li>
+  </ul>
+  <p>Followers behave like internal consumers fetching from the leader. The one exception is <strong>KIP-392 fetch-from-follower</strong>, where a consumer reads a rack-local replica to avoid cross-AZ traffic — a cost optimisation, not a throughput one.</p>
+
+  <h2 id="calc">Key → partition, and why adding partitions breaks ordering</h2>
+<pre>partition = toPositive(murmur2(keyBytes)) % numPartitions</pre>
+  <ul>
+    <li>With a key, the same key always lands on the same partition — this is the <strong>only</strong> mechanism Kafka gives you for ordering related events.</li>
+    <li>With a null key you get the <strong>sticky partitioner</strong>: records pile into one partition until the batch fills or <code>linger.ms</code> expires, and only then does it switch. It is <strong>not</strong> per-record round-robin — a detail people routinely get wrong.</li>
+  </ul>
+
+  <div class="callout warn">
+    <span class="tag">One-way door</span>
+    <p>Changing <code>numPartitions</code> changes the divisor, so roughly half the keys jump to a different partition. Old events for a key stay on the old partition while new ones go to the new one, and the consumer no longer sees that key's events in order. That is why adding partitions cannot be undone, and why there is no way to add them while preserving order — only creating a new topic and migrating deliberately.</p>
+  </div>
+
+  <div class="tool">
+    <p class="tool-head">Try it — murmur2 exactly as Kafka computes it</p>
+    <div class="fields">
+      <div class="field"><label for="k-key">Message key</label><input id="k-key" type="text" value="user-42" autocomplete="off" spellcheck="false"></div>
+      <div class="field"><label for="k-before">Partitions before</label><input id="k-before" type="number" min="1" max="4096" value="3"></div>
+      <div class="field"><label for="k-after">Partitions after</label><input id="k-after" type="number" min="1" max="4096" value="6"></div>
+    </div>
+    <div class="result">
+      <span class="chip">murmur2 <b id="k-hash">—</b></span>
+      <span class="chip">before → partition <b id="k-p1">—</b></span>
+      <span class="chip">after → partition <b id="k-p2">—</b></span>
+    </div>
+    <p class="verdict" id="k-verdict">—</p>
+  </div>
+
+  <h2>Ordering guarantees, stated precisely</h2>
+  <p><strong>Kafka guarantees</strong> the order of records within a partition, provided the producer is configured correctly. <strong>Kafka does not guarantee</strong> order in any of these cases:</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Situation</th><th>Why order is lost</th></tr></thead>
+    <tbody>
+      <tr><td>Across partitions, or topic-wide</td><td>No shared clock and no global sequencer</td></tr>
+      <tr><td>Producer retries without idempotence and <code>max.in.flight &gt; 1</code></td><td>A later request can succeed before the one being retried</td></tr>
+      <tr><td>Null key</td><td>Records for the same entity spread across partitions</td></tr>
+      <tr><td>After increasing the partition count</td><td>Keys jump partitions while old data stays behind</td></tr>
+      <tr><td>Consumer hands records to a thread pool after <code>poll()</code></td><td>Kafka delivered them in order; your code broke it</td></tr>
+      <tr><td>Share groups (KIP-932)</td><td>Ordering traded away for parallelism</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout">
+    <span class="tag">A sentence worth having ready</span>
+    <p>“Kafka gives me ordering at partition scope. For ordering at business-entity scope I have to key by entity id, enable the idempotent producer, and process each partition sequentially.”</p>
+  </div>
+
+  <h2>Six common traps</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Claim</th><th>What is wrong with it</th></tr></thead>
+    <tbody>
+      <tr><td>“Kafka is a FIFO queue”</td><td>FIFO only within a partition</td></tr>
+      <tr><td>“Kafka is exactly-once by default”</td><td>The default is at-least-once; EOS needs transactions and only holds Kafka-to-Kafka (M7)</td></tr>
+      <tr><td>“More consumers means more throughput”</td><td>Capped by partition count</td></tr>
+      <tr><td>“Messages are deleted once consumed”</td><td>Deletion follows retention and is entirely independent of consumption</td></tr>
+      <tr><td>“<code>acks=all</code> means every replica has the write”</td><td>It means every replica <strong>in the ISR</strong>. If the ISR shrinks to one, <code>acks=all</code> protects nothing — it needs <code>min.insync.replicas</code> alongside it (M3)</td></tr>
+      <tr><td>“High consumer lag means a slow consumer”</td><td>Lag is an offset difference; it can be a producer burst, or partitions not yet assigned</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2 id="lab">Lab 01 — a three-broker KRaft cluster</h2>
+  <p>In <code>labs/lab01/</code>: a <code>docker-compose.yml</code> (three nodes in combined mode plus Kafka UI) and five Python scripts.</p>
+<pre><span class="c"># bring the cluster up; all three nodes healthy in ~30-60s</span>
+docker compose up -d &amp;&amp; docker compose ps
+<span class="c"># UI: http://localhost:8080 — bootstrap: localhost:19092,localhost:29092,localhost:39092</span>
+
+docker exec kafka1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --topic lab01.orders --partitions 3 --replication-factor 3
+
+pip install -r requirements.txt &amp;&amp; cd scripts</pre>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Script</th><th>What to watch for</th></tr></thead>
+    <tbody>
+      <tr><td><code>01_produce_no_key.py</code></td><td>12 keyless records do <strong>not</strong> split 4/4/4 — sticky partitioner, not round-robin</td></tr>
+      <tr><td><code>02_produce_with_key.py</code></td><td>The same key always lands on the same partition</td></tr>
+      <tr><td><code>03_consumer_group.py</code></td><td><code>ASSIGNED</code>/<code>REVOKED</code> lines on every rebalance; a fourth consumer on three partitions gets an empty assignment; a second group replays from the beginning, independently</td></tr>
+      <tr><td><code>04_ordering_demo.py</code></td><td>Order holds inside each partition and is interleaved across the topic</td></tr>
+      <tr><td><code>05_key_remap.py</code></td><td>Runs offline, no broker needed: 5 of 10 keys change partition going from 3 to 6</td></tr>
+    </tbody>
+  </table></div>
+
+  <p><strong>The exercise that matters most</strong> — run <code>--alter --partitions 6</code>, re-run <code>02_produce_with_key.py</code>, compare the key-to-partition mapping before and after, and check it against what <code>05_key_remap.py</code> predicted. Then try shrinking back to 3 and read the error Kafka returns.</p>
+
+  <h2 id="questions">Interview questions — session 1</h2>
+  <p>Tick the ones you can answer fluently on your own. The senior-tier questions are the ones to write out and have graded.</p>
+
+  <ul class="qlist" id="qlist" data-store="m1-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Define topic, partition, offset and replica, and the relationships between them.</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Why can't the number of useful consumers in a group exceed the partition count?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is the message key for? What happens when it is null?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>What are the consequences of increasing the partition count on a live topic? Can you decrease it, and why not?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Read <code>Replicas: 2,3,1 · Isr: 2,3</code> — what does it tell you?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Kafka vs RabbitMQ: give the selection criteria without comparing throughput.</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A topic has 3 partitions and you need 30 consumers working in parallel while preserving order per <code>user_id</code>. How? There is more than one answer — give the trade-offs of each.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>At what scope does Kafka guarantee ordering? Name three ways to lose it even with the key set correctly.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why is Kafka fast despite writing to disk? Answer at the mechanism level — don't stop at “sequential writes”.</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>When would you advise a team <strong>against</strong> Kafka? Give three concrete situations.</span></label></li>
+    <li><label><input type="checkbox" data-q="11"><span class="qtext"><span class="lvl hard">Senior</span>How do Share Groups differ from consumer groups, and what do they trade away?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m1-questions">0 / 11</p>
+
+  <hr>
+  <p class="qmeta">Next module: <strong>M2 — Storage internals</strong>. Question 9 above is the bridge into it.</p>
+</main>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  // murmur2, matching org.apache.kafka.common.utils.Utils.murmur2
+  function murmur2(bytes){
+    var seed = 0x9747b28c, m = 0x5bd1e995, r = 24;
+    var len = bytes.length, len4 = len & ~3;
+    var h = (seed ^ len) >>> 0;
+    for (var i = 0; i < len4; i += 4){
+      var k = (bytes[i] & 0xff) | ((bytes[i+1] & 0xff) << 8) | ((bytes[i+2] & 0xff) << 16) | (bytes[i+3] << 24);
+      k = Math.imul(k, m) >>> 0;
+      k = (k ^ (k >>> r)) >>> 0;
+      k = Math.imul(k, m) >>> 0;
+      h = Math.imul(h, m) >>> 0;
+      h = (h ^ k) >>> 0;
+    }
+    var rem = len & 3;
+    if (rem === 3) h = (h ^ ((bytes[len4+2] & 0xff) << 16)) >>> 0;
+    if (rem >= 2)  h = (h ^ ((bytes[len4+1] & 0xff) << 8)) >>> 0;
+    if (rem >= 1){ h = (h ^ (bytes[len4] & 0xff)) >>> 0; h = Math.imul(h, m) >>> 0; }
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = Math.imul(h, m) >>> 0;
+    h = (h ^ (h >>> 15)) >>> 0;
+    return h;
+  }
+  function partitionOf(key, n){
+    if (!key.length || !(n > 0)) return null;
+    return ((murmur2(new TextEncoder().encode(key)) & 0x7fffffff) % n);
+  }
+
+  var elKey = document.getElementById('k-key');
+  if (elKey){
+    var elB = document.getElementById('k-before');
+    var elA = document.getElementById('k-after');
+    var outH = document.getElementById('k-hash');
+    var outP1 = document.getElementById('k-p1');
+    var outP2 = document.getElementById('k-p2');
+    var outV = document.getElementById('k-verdict');
+
+    var recompute = function(){
+      var key = elKey.value;
+      var nb = parseInt(elB.value, 10), na = parseInt(elA.value, 10);
+      if (!key.length){
+        outH.textContent = outP1.textContent = outP2.textContent = '—';
+        outV.className = 'verdict';
+        outV.textContent = 'Empty key means a null key: the sticky partitioner decides, nothing is hashed.';
+        return;
+      }
+      outH.textContent = murmur2(new TextEncoder().encode(key)).toString(10);
+      var p1 = partitionOf(key, nb), p2 = partitionOf(key, na);
+      outP1.textContent = p1 === null ? '—' : p1;
+      outP2.textContent = p2 === null ? '—' : p2;
+      if (p1 === null || p2 === null){
+        outV.className = 'verdict';
+        outV.textContent = 'Partition count must be at least 1.';
+      } else if (p1 === p2){
+        outV.className = 'verdict kept';
+        outV.textContent = 'Key stays on the same partition — ordering for this key is unaffected.';
+      } else {
+        outV.className = 'verdict moved';
+        outV.textContent = 'Key moves from partition ' + p1 + ' to ' + p2 + '. Older events stay on ' + p1 + ' while new ones go to ' + p2 + ', so ordering breaks.';
+      }
+    };
+    [elKey, elB, elA].forEach(function(el){ el.addEventListener('input', recompute); });
+    recompute();
+  }
+
+  // Checklist state, stored per viewer in their own browser; best-effort.
+  document.querySelectorAll('.qlist[data-store]').forEach(function(list){
+    var KEY = 'kafka-dd-' + list.dataset.store;
+    var boxes = Array.prototype.slice.call(list.querySelectorAll('input[type=checkbox]'));
+    var counter = document.querySelector('[data-count-for="' + list.dataset.store + '"]');
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { saved = {}; }
+    var render = function(){
+      if (!counter) return;
+      var done = boxes.filter(function(b){ return b.checked; }).length;
+      counter.textContent = done + ' / ' + boxes.length + (done === boxes.length ? ' — all done' : '');
+    };
+    boxes.forEach(function(b){
+      if (saved[b.dataset.q]) b.checked = true;
+      b.addEventListener('change', function(){
+        var state = {};
+        boxes.forEach(function(x){ if (x.checked) state[x.dataset.q] = 1; });
+        try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+        render();
+      });
+    });
+    render();
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+<script>
+(function(){
+  "use strict";
+
+  // murmur2, matching org.apache.kafka.common.utils.Utils.murmur2
+  function murmur2(bytes){
+    var seed = 0x9747b28c, m = 0x5bd1e995, r = 24;
+    var len = bytes.length, len4 = len & ~3;
+    var h = (seed ^ len) >>> 0;
+    for (var i = 0; i < len4; i += 4){
+      var k = (bytes[i] & 0xff) | ((bytes[i+1] & 0xff) << 8) | ((bytes[i+2] & 0xff) << 16) | (bytes[i+3] << 24);
+      k = Math.imul(k, m) >>> 0;
+      k = (k ^ (k >>> r)) >>> 0;
+      k = Math.imul(k, m) >>> 0;
+      h = Math.imul(h, m) >>> 0;
+      h = (h ^ k) >>> 0;
+    }
+    var rem = len & 3;
+    if (rem === 3) h = (h ^ ((bytes[len4+2] & 0xff) << 16)) >>> 0;
+    if (rem >= 2)  h = (h ^ ((bytes[len4+1] & 0xff) << 8)) >>> 0;
+    if (rem >= 1){ h = (h ^ (bytes[len4] & 0xff)) >>> 0; h = Math.imul(h, m) >>> 0; }
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = Math.imul(h, m) >>> 0;
+    h = (h ^ (h >>> 15)) >>> 0;
+    return h;
+  }
+  function partitionOf(key, n){
+    if (!key.length || !(n > 0)) return null;
+    return ((murmur2(new TextEncoder().encode(key)) & 0x7fffffff) % n);
+  }
+
+  var elKey = document.getElementById('k-key');
+  if (elKey){
+    var elB = document.getElementById('k-before');
+    var elA = document.getElementById('k-after');
+    var outH = document.getElementById('k-hash');
+    var outP1 = document.getElementById('k-p1');
+    var outP2 = document.getElementById('k-p2');
+    var outV = document.getElementById('k-verdict');
+
+    var recompute = function(){
+      var key = elKey.value;
+      var nb = parseInt(elB.value, 10), na = parseInt(elA.value, 10);
+      if (!key.length){
+        outH.textContent = outP1.textContent = outP2.textContent = '—';
+        outV.className = 'verdict';
+        outV.textContent = 'Empty key means a null key: the sticky partitioner decides, nothing is hashed.';
+        return;
+      }
+      outH.textContent = murmur2(new TextEncoder().encode(key)).toString(10);
+      var p1 = partitionOf(key, nb), p2 = partitionOf(key, na);
+      outP1.textContent = p1 === null ? '—' : p1;
+      outP2.textContent = p2 === null ? '—' : p2;
+      if (p1 === null || p2 === null){
+        outV.className = 'verdict';
+        outV.textContent = 'Partition count must be at least 1.';
+      } else if (p1 === p2){
+        outV.className = 'verdict kept';
+        outV.textContent = 'Key stays on the same partition — ordering for this key is unaffected.';
+      } else {
+        outV.className = 'verdict moved';
+        outV.textContent = 'Key moves from partition ' + p1 + ' to ' + p2 + '. Older events stay on ' + p1 + ' while new ones go to ' + p2 + ', so ordering breaks.';
+      }
+    };
+    [elKey, elB, elA].forEach(function(el){ el.addEventListener('input', recompute); });
+    recompute();
+  }
+
+  // Checklist state, stored per viewer in their own browser; best-effort.
+  document.querySelectorAll('.qlist[data-store]').forEach(function(list){
+    var KEY = 'kafka-dd-' + list.dataset.store;
+    var boxes = Array.prototype.slice.call(list.querySelectorAll('input[type=checkbox]'));
+    var counter = document.querySelector('[data-count-for="' + list.dataset.store + '"]');
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { saved = {}; }
+    var render = function(){
+      if (!counter) return;
+      var done = boxes.filter(function(b){ return b.checked; }).length;
+      counter.textContent = done + ' / ' + boxes.length + (done === boxes.length ? ' — all done' : '');
+    };
+    boxes.forEach(function(b){
+      if (saved[b.dataset.q]) b.checked = true;
+      b.addEventListener('change', function(){
+        var state = {};
+        boxes.forEach(function(x){ if (x.checked) state[x.dataset.q] = 1; });
+        try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+        render();
+      });
+    });
+    render();
+  });
+})();
+</script>
