@@ -18,10 +18,14 @@ Each module follows the same four steps:
 
 ## Progress
 
-| Module | Topic | Notes | Lab | Answers |
+`Material` means the notes and lab exist. The other two columns are the ones that
+count: a module is finished when its lab has actually been run and its senior-tier
+questions have been answered and graded.
+
+| Module | Topic | Material | Lab run | Questions graded |
 |---|---|:--:|:--:|:--:|
-| M0 | Positioning: commit log vs queue, when not to use Kafka, Share Groups | ✅ | ✅ | |
-| M1 | Topic, partition, offset, replica, consumer group, ordering | ✅ | ✅ | |
+| M0 | Positioning: log vs queue, when not to use Kafka, Share Groups | ready | | |
+| M1 | Topic, partition, offset, replica, consumer group, ordering | ready | | |
 | M2 | Storage internals: segments, page cache, zero-copy, compaction | | | |
 | M3 | Replication, ISR, LEO vs high watermark, unclean leader election | | | |
 | M4 | KRaft: quorum controller, metadata log | | | |
@@ -47,6 +51,8 @@ src/                 notes source, one partial per module
 tools/build.py       assembles src/ (and private/src/) into the pages below
 docs/index.html      generated — standalone page for GitHub Pages
 dist/artifact.html   generated — page body without the HTML skeleton
+labs/lab00-log-vs-queue/
+                     Kafka and RabbitMQ side by side: consuming does not delete
 labs/lab01/          three-broker KRaft cluster + Python scripts
 private/             gitignored — raw answers, grades and gap notes, local only
 ```
@@ -71,8 +77,8 @@ no build dependencies beyond Python 3.
 ## Running a lab
 
 ```bash
-cd labs/lab01
-docker compose up -d && docker compose ps     # wait for all three nodes to be healthy
+cd labs/lab00-log-vs-queue        # or labs/lab01
+docker compose up -d && docker compose ps     # wait for every node to be healthy
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```

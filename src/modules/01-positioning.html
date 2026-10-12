@@ -1,0 +1,106 @@
+  <p class="eyebrow">Module 0</p>
+  <h1>Positioning Kafka</h1>
+  <p class="lede">Before any mechanism: what Kafka actually is, what follows from that, and when the honest answer is to use something else. Most wrong answers in a Kafka interview trace back to a broken mental model at this level.</p>
+
+  <h2 id="m0">One definition, derive everything else from it</h2>
+
+  <div class="callout">
+    <span class="tag">Mental model</span>
+    <p>Kafka is a <strong>distributed, replicated, append-only commit log</strong> in which the broker is only responsible for storing and serving the log, while <strong>the read position is owned by the consumer</strong>.</p>
+  </div>
+
+  <p>This is the one thing worth memorising. Every characteristic property of Kafka follows from it, so in an interview you can derive the answer on the spot instead of reciting it.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Because Kafka is a log and consumers own their offsets</th><th>It follows that</th></tr></thead>
+    <tbody>
+      <tr><td>The broker keeps no per-message state</td><td>Very high throughput; the broker does almost nothing but sequential I/O</td></tr>
+      <tr><td>Reading is non-destructive</td><td>Many consumer groups read the same data independently; <strong>replay</strong> is free</td></tr>
+      <tr><td>Data is deleted by <strong>retention policy</strong>, not by consumption</td><td>Keep 7 days, a year, or forever via compaction / tiered storage</td></tr>
+      <tr><td>There is no per-message ack at the broker</td><td><strong>No</strong> per-message retry, delay, priority or selective nack</td></tr>
+      <tr><td>Order only exists inside one log file</td><td>Order is guaranteed <strong>within a partition</strong> only</td></tr>
+      <tr><td>Nothing is indexed by content</td><td>You cannot ask for “messages where status=FAILED” — that is a database's job</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>How it compares</h3>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Kafka</th><th>RabbitMQ</th><th>Pulsar</th><th>SQS</th></tr></thead>
+    <tbody>
+      <tr><td>Model</td><td>Log, consumer owns offset</td><td>Queue, broker owns per-message state</td><td>Log, storage split from compute (BookKeeper)</td><td>Managed queue, visibility timeout</td></tr>
+      <tr><td>After consumption</td><td>Data stays</td><td>Message is removed on ack</td><td>Data stays, removed by retention</td><td>Removed on delete</td></tr>
+      <tr><td>Replay</td><td>Native (reset offsets)</td><td>No</td><td>Native</td><td>No</td></tr>
+      <tr><td>Ordering</td><td>Per partition</td><td>Per queue, easily lost once consumers scale out</td><td>Per partition / per key</td><td>Standard: none · FIFO: per message group</td></tr>
+      <tr><td>Broker-side routing</td><td>None</td><td>Very strong (exchanges, topic, headers)</td><td>Yes</td><td>None</td></tr>
+      <tr><td>Per-message retry / delay</td><td>No (build it yourself)</td><td>Built in (DLX, TTL, delayed exchange)</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Throughput</td><td>Very high</td><td>Moderate</td><td>High</td><td>Moderate, managed</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout">
+    <span class="tag">Answering “Kafka or RabbitMQ?”</span>
+    <p>Do not compare throughput. Compare the <strong>unit of state</strong>: Kafka tracks state as <em>a stream plus an offset</em>, RabbitMQ tracks it <em>per message</em>. If the problem needs control over individual messages — its own retry, its own delay, its own priority — you are fighting Kafka's design. If the problem needs one event stream that several consumers share and can replay, the opposite holds.</p>
+  </div>
+
+  <h3>When not to use Kafka</h3>
+  <ol>
+    <li><strong>Low-latency request/reply.</strong> Kafka is not RPC — use gRPC or HTTP.</li>
+    <li><strong>A task queue with per-task retry, delay and priority</strong> and a worker count that swings widely — RabbitMQ, SQS or Celery fit more naturally.</li>
+    <li><strong>Fan-out to end clients</strong> (mobile, browser, millions of connections). Kafka is not client-facing; it sits behind a WebSocket or push layer.</li>
+    <li><strong>Small scale, one consumer, no replay needed.</strong> Postgres with an outbox table, or a Redis stream, costs far less to operate.</li>
+    <li><strong>Querying by message content</strong>, or updating or deleting one specific message. That is a database.</li>
+    <li><strong>Scheduled or delayed delivery.</strong> Kafka has none natively — you would build tiered delay topics or an external scheduler.</li>
+  </ol>
+
+  <h3>Share Groups (KIP-932) — the 2026 talking point</h3>
+  <p>Share Groups reached production-ready status in Kafka 4.2. Interviews have started asking about this and many candidates have not caught up.</p>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Consumer group</th><th>Share group</th></tr></thead>
+    <tbody>
+      <tr><td>Consumers reading one partition</td><td>Exactly one</td><td><strong>Many</strong></td></tr>
+      <tr><td>Unit of progress</td><td>An offset — a single cursor</td><td><strong>Per-record state</strong>: acquired / acknowledged / released</td></tr>
+      <tr><td>Parallelism ceiling</td><td>Partition count</td><td>Not bounded by partition count</td></tr>
+      <tr><td>Per-record redelivery</td><td>No</td><td>Yes, with a delivery count</td></tr>
+      <tr><td>Ordering</td><td>Yes (per partition)</td><td><strong>Given up</strong> — this is the trade</td></tr>
+    </tbody>
+  </table></div>
+  <p>A senior-level answer to “can Kafka replace RabbitMQ yet?”: <em>much closer since 4.2, but it still lacks broker-side routing and delayed delivery, and Share Groups trade ordering away to get parallelism.</em></p>
+
+
+  <h2 id="lab00">Lab 00 — a log and a queue, side by side</h2>
+  <p>Everything above is a claim until you watch it happen. <code>labs/lab00-log-vs-queue/</code> runs one Kafka topic and one RabbitMQ queue next to each other and pushes the same five messages through both.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Step</th><th>What to watch for</th></tr></thead>
+    <tbody>
+      <tr><td><code>01_publish_both.py</code></td><td>Five messages into each side. Note the RabbitMQ queue depth.</td></tr>
+      <tr><td><code>02_consume_both.py</code></td><td>Both hand you the same five. Then: RabbitMQ queue depth drops to <strong>0</strong> — acking deleted them — while Kafka still holds all five and only the group's committed offset moved.</td></tr>
+      <tr><td><code>03_read_again.py</code></td><td>A <strong>new</strong> Kafka consumer group replays all five from offset 0. RabbitMQ has nothing for anybody.</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Verify it yourself rather than trusting the script's output — the end offset stays at 5 while the group's position is what changed:</p>
+<pre>docker exec lab00-kafka /opt/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+  --bootstrap-server localhost:19092 --topic lab00.events
+docker exec lab00-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:19092 --describe --group reader-a
+docker exec lab00-rabbitmq rabbitmqctl list_queues name messages</pre>
+
+  <p>The lab README carries four exercises. The one that matters most is the first: set <code>retention.ms=60000</code> and watch the records vanish with nobody consuming them — that is the proof that deletion is driven by retention and never by consumption.</p>
+
+  <h2 id="q-m0">Interview questions — module 0</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded.</p>
+
+  <ul class="qlist" data-store="m0-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Describe Kafka in one sentence. What is a consumer's unit of progress?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Does a message disappear once it has been consumed? What actually decides when it is deleted?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>Name two things a message queue gives you that Kafka does not.</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Kafka vs RabbitMQ: give the selection criteria without comparing throughput.</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Why does Kafka have no per-message retry, delay or priority? Tie it to the design rather than calling it a missing feature.</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Adding a new downstream consumer six months after launch: what does that cost in Kafka, and what does it cost in RabbitMQ?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>When would you advise a team <strong>against</strong> Kafka? Give three concrete situations.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>How do Share Groups (KIP-932) differ from consumer groups, and what do they trade away?</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A team needs delayed delivery — "retry this in 30 minutes" — on Kafka. Design it, and state what you give up.</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Your company already runs RabbitMQ. A team wants to add Kafka for an event stream. Argue both sides of running two brokers.</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m0-questions">0 / 10</p>

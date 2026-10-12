@@ -58,6 +58,8 @@ body{
 .rail nav a.done .n{color:var(--accent)}
 .rail nav a.todo{color:var(--muted)}
 .rail nav a.todo .n{opacity:.6}
+.rail nav a.wip .n{color:var(--warn)}
+.legend i{color:var(--warn); font-style:normal}
 .legend{font-family:var(--font-mono); font-size:10px; color:var(--muted); margin-top:20px; line-height:1.9; border-top:1px solid var(--rule); padding-top:14px}
 .legend b{color:var(--accent); font-weight:500}
 .repo-link{font-family:var(--font-mono); font-size:10px; margin-top:12px}
@@ -153,16 +155,22 @@ pre .c{color:var(--muted)}
   <p class="brand">Kafka <span>Deep</span> Dive</p>
   <p class="brand-sub">Kafka 4.x · senior prep</p>
 
-  <h3>Covered</h3>
+  <h3>Modules</h3>
   <nav>
     <a class="done" href="#roadmap"><span class="n">—</span><span>Roadmap</span></a>
-    <a class="done" href="#m1"><span class="n">01</span><span>Positioning &amp; core concepts</span></a>
-    <a class="done" href="#calc"><span class="n">↳</span><span>Partition calculator</span></a>
-    <a class="done" href="#lab"><span class="n">↳</span><span>Lab 01</span></a>
-    <a class="done" href="#questions"><span class="n">↳</span><span>Interview questions</span></a>
+    <a class="wip" href="#m0"><span class="n">M0</span><span>Positioning Kafka</span></a>
+    <a class="wip" href="#lab00"><span class="n">↳</span><span>Lab 00 · log vs queue</span></a>
+    <a class="wip" href="#q-m0"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
-  <h3>Next up</h3>
+  <nav>
+    <a class="wip" href="#m1"><span class="n">M1</span><span>Core concepts</span></a>
+    <a class="wip" href="#calc"><span class="n">↳</span><span>Partition calculator</span></a>
+    <a class="wip" href="#lab01"><span class="n">↳</span><span>Lab 01 · partitions</span></a>
+    <a class="wip" href="#q-m1"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
+  <h3>Not started</h3>
   <nav>
     <a class="todo" href="#roadmap"><span class="n">M2</span><span>Storage internals</span></a>
     <a class="todo" href="#roadmap"><span class="n">M3</span><span>Replication &amp; ISR</span></a>
@@ -172,13 +180,13 @@ pre .c{color:var(--muted)}
     <a class="todo" href="#roadmap"><span class="n">M7</span><span>Transactions</span></a>
   </nav>
 
-  <p class="legend"><b>●</b> covered &nbsp;·&nbsp; ○ pending<br>Updated after each session.</p>
+  <p class="legend"><b>●</b> done &nbsp;·&nbsp; <i>◐</i> in progress &nbsp;·&nbsp; ○ not started<br>A module is done once its lab has been run and its senior questions graded.</p>
 </aside>
 
 <main>
-  <p class="eyebrow">Session 1 · M0 + M1</p>
-  <h1>Positioning Kafka &amp; core concepts</h1>
-  <p class="lede">The foundation session. Most wrong answers in a Kafka interview do not come from missing deep knowledge — they come from a broken mental model at this level.</p>
+  <p class="eyebrow">Kafka 4.x · senior interview prep</p>
+  <h1>Kafka Deep Dive</h1>
+  <p class="lede">Working through Apache Kafka from fundamentals to internals, one module at a time. A module counts as done only once its lab has been run and its senior-tier questions have been answered and graded — writing the notes does not count.</p>
   <p class="qmeta">Targets Apache Kafka 4.x (KRaft-only). Latest release as of 09/2026: 4.3.x.</p>
 
   <h2 id="roadmap">Roadmap — 14 modules</h2>
@@ -204,7 +212,11 @@ pre .c{color:var(--muted)}
     </tbody>
   </table></div>
 
-  <h2 id="m1">One definition, derive everything else from it</h2>
+  <p class="eyebrow">Module 0</p>
+  <h1>Positioning Kafka</h1>
+  <p class="lede">Before any mechanism: what Kafka actually is, what follows from that, and when the honest answer is to use something else. Most wrong answers in a Kafka interview trace back to a broken mental model at this level.</p>
+
+  <h2 id="m0">One definition, derive everything else from it</h2>
 
   <div class="callout">
     <span class="tag">Mental model</span>
@@ -268,7 +280,50 @@ pre .c{color:var(--muted)}
   </table></div>
   <p>A senior-level answer to “can Kafka replace RabbitMQ yet?”: <em>much closer since 4.2, but it still lacks broker-side routing and delayed delivery, and Share Groups trade ordering away to get parallelism.</em></p>
 
-  <h2>A partition is the unit of four things at once</h2>
+
+  <h2 id="lab00">Lab 00 — a log and a queue, side by side</h2>
+  <p>Everything above is a claim until you watch it happen. <code>labs/lab00-log-vs-queue/</code> runs one Kafka topic and one RabbitMQ queue next to each other and pushes the same five messages through both.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Step</th><th>What to watch for</th></tr></thead>
+    <tbody>
+      <tr><td><code>01_publish_both.py</code></td><td>Five messages into each side. Note the RabbitMQ queue depth.</td></tr>
+      <tr><td><code>02_consume_both.py</code></td><td>Both hand you the same five. Then: RabbitMQ queue depth drops to <strong>0</strong> — acking deleted them — while Kafka still holds all five and only the group's committed offset moved.</td></tr>
+      <tr><td><code>03_read_again.py</code></td><td>A <strong>new</strong> Kafka consumer group replays all five from offset 0. RabbitMQ has nothing for anybody.</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Verify it yourself rather than trusting the script's output — the end offset stays at 5 while the group's position is what changed:</p>
+<pre>docker exec lab00-kafka /opt/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+  --bootstrap-server localhost:19092 --topic lab00.events
+docker exec lab00-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:19092 --describe --group reader-a
+docker exec lab00-rabbitmq rabbitmqctl list_queues name messages</pre>
+
+  <p>The lab README carries four exercises. The one that matters most is the first: set <code>retention.ms=60000</code> and watch the records vanish with nobody consuming them — that is the proof that deletion is driven by retention and never by consumption.</p>
+
+  <h2 id="q-m0">Interview questions — module 0</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded.</p>
+
+  <ul class="qlist" data-store="m0-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Describe Kafka in one sentence. What is a consumer's unit of progress?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Does a message disappear once it has been consumed? What actually decides when it is deleted?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>Name two things a message queue gives you that Kafka does not.</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Kafka vs RabbitMQ: give the selection criteria without comparing throughput.</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Why does Kafka have no per-message retry, delay or priority? Tie it to the design rather than calling it a missing feature.</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Adding a new downstream consumer six months after launch: what does that cost in Kafka, and what does it cost in RabbitMQ?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>When would you advise a team <strong>against</strong> Kafka? Give three concrete situations.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>How do Share Groups (KIP-932) differ from consumer groups, and what do they trade away?</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A team needs delayed delivery — "retry this in 30 minutes" — on Kafka. Design it, and state what you give up.</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Your company already runs RabbitMQ. A team wants to add Kafka for an event stream. Argue both sides of running two brokers.</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m0-questions">0 / 10</p>
+
+  <p class="eyebrow">Module 1</p>
+  <h1>Core concepts</h1>
+  <p class="lede">Topic, partition, offset, replica, consumer group — and the one guarantee Kafka actually makes about ordering.</p>
+
+  <h2 id="m1">A partition is the unit of four things at once</h2>
   <p>A <strong>topic</strong> is purely logical — just a name; no file on disk is named after it. The <strong>partition</strong> is the real object: one log on disk, and simultaneously the unit of</p>
   <ol>
     <li>parallelism</li>
@@ -361,7 +416,7 @@ Topic: lab01.orders  Partition: 2  Leader: 1  Replicas: 1,2,3  Isr: 1,2,3</pre>
     </tbody>
   </table></div>
 
-  <h2 id="lab">Lab 01 — a three-broker KRaft cluster</h2>
+  <h2 id="lab01">Lab 01 — a three-broker KRaft cluster</h2>
   <p>In <code>labs/lab01/</code>: a <code>docker-compose.yml</code> (three nodes in combined mode plus Kafka UI) and five Python scripts.</p>
 <pre><span class="c"># bring the cluster up; all three nodes healthy in ~30-60s</span>
 docker compose up -d &amp;&amp; docker compose ps
@@ -385,23 +440,21 @@ pip install -r requirements.txt &amp;&amp; cd scripts</pre>
 
   <p><strong>The exercise that matters most</strong> — run <code>--alter --partitions 6</code>, re-run <code>02_produce_with_key.py</code>, compare the key-to-partition mapping before and after, and check it against what <code>05_key_remap.py</code> predicted. Then try shrinking back to 3 and read the error Kafka returns.</p>
 
-  <h2 id="questions">Interview questions — session 1</h2>
-  <p>Tick the ones you can answer fluently on your own. The senior-tier questions are the ones to write out and have graded.</p>
 
-  <ul class="qlist" id="qlist" data-store="m1-questions">
+  <h2 id="q-m1">Interview questions — module 1</h2>
+
+  <ul class="qlist" data-store="m1-questions">
     <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Define topic, partition, offset and replica, and the relationships between them.</span></label></li>
     <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Why can't the number of useful consumers in a group exceed the partition count?</span></label></li>
     <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is the message key for? What happens when it is null?</span></label></li>
     <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>What are the consequences of increasing the partition count on a live topic? Can you decrease it, and why not?</span></label></li>
     <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Read <code>Replicas: 2,3,1 · Isr: 2,3</code> — what does it tell you?</span></label></li>
-    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Kafka vs RabbitMQ: give the selection criteria without comparing throughput.</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Two groups read the same topic. Where is each group's progress kept, and how does Kafka keep them from interfering?</span></label></li>
     <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A topic has 3 partitions and you need 30 consumers working in parallel while preserving order per <code>user_id</code>. How? There is more than one answer — give the trade-offs of each.</span></label></li>
     <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>At what scope does Kafka guarantee ordering? Name three ways to lose it even with the key set correctly.</span></label></li>
     <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why is Kafka fast despite writing to disk? Answer at the mechanism level — don't stop at “sequential writes”.</span></label></li>
-    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>When would you advise a team <strong>against</strong> Kafka? Give three concrete situations.</span></label></li>
-    <li><label><input type="checkbox" data-q="11"><span class="qtext"><span class="lvl hard">Senior</span>How do Share Groups differ from consumer groups, and what do they trade away?</span></label></li>
   </ul>
-  <p class="qmeta" data-count-for="m1-questions">0 / 11</p>
+  <p class="qmeta" data-count-for="m1-questions">0 / 9</p>
 
   <hr>
   <p class="qmeta">Next module: <strong>M2 — Storage internals</strong>. Question 9 above is the bridge into it.</p>

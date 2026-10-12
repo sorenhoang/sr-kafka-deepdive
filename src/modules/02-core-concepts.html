@@ -1,96 +1,8 @@
-  <p class="eyebrow">Session 1 · M0 + M1</p>
-  <h1>Positioning Kafka &amp; core concepts</h1>
-  <p class="lede">The foundation session. Most wrong answers in a Kafka interview do not come from missing deep knowledge — they come from a broken mental model at this level.</p>
-  <p class="qmeta">Targets Apache Kafka 4.x (KRaft-only). Latest release as of 09/2026: 4.3.x.</p>
+  <p class="eyebrow">Module 1</p>
+  <h1>Core concepts</h1>
+  <p class="lede">Topic, partition, offset, replica, consumer group — and the one guarantee Kafka actually makes about ordering.</p>
 
-  <h2 id="roadmap">Roadmap — 14 modules</h2>
-  <p>Every module runs the same four steps: walkthrough → this page → hands-on lab → graded question set. Questions are tiered <em>Junior → Mid → Senior</em>; senior answers get written out and graded against <em>missing the point / correct but shallow / senior level</em>.</p>
-
-  <div class="scroll"><table>
-    <thead><tr><th>Part</th><th>Module</th><th>Core content</th><th>Status</th></tr></thead>
-    <tbody>
-      <tr><td rowspan="3">A · Foundations</td><td class="num">M0</td><td>Kafka as a commit log; RabbitMQ / Pulsar / SQS comparison; when not to use it; Share Groups</td><td><code>done</code></td></tr>
-      <tr><td class="num">M1</td><td>Topic, partition, offset, replica, consumer group, ordering guarantees</td><td><code>done</code></td></tr>
-      <tr><td class="num">M2</td><td>Log segments, indexes, page cache, zero-copy, retention, compaction, tiered storage</td><td>next</td></tr>
-      <tr><td rowspan="2">B · Core mechanics</td><td class="num">M3</td><td>Replication, ISR, LEO vs high watermark, unclean leader election, data-loss matrix</td><td>—</td></tr>
-      <tr><td class="num">M4</td><td>KRaft: quorum controller, metadata log, why ZooKeeper had to go</td><td>—</td></tr>
-      <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td>—</td></tr>
-      <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td>—</td></tr>
-      <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td>—</td></tr>
-      <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td>—</td></tr>
-      <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td>—</td></tr>
-      <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td>—</td></tr>
-      <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td>—</td></tr>
-      <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td>—</td></tr>
-      <tr><td class="num">M13</td><td>Mock interview, rapid-fire, incident scenarios, senior rubric</td><td>—</td></tr>
-    </tbody>
-  </table></div>
-
-  <h2 id="m1">One definition, derive everything else from it</h2>
-
-  <div class="callout">
-    <span class="tag">Mental model</span>
-    <p>Kafka is a <strong>distributed, replicated, append-only commit log</strong> in which the broker is only responsible for storing and serving the log, while <strong>the read position is owned by the consumer</strong>.</p>
-  </div>
-
-  <p>This is the one thing worth memorising. Every characteristic property of Kafka follows from it, so in an interview you can derive the answer on the spot instead of reciting it.</p>
-
-  <div class="scroll"><table>
-    <thead><tr><th>Because Kafka is a log and consumers own their offsets</th><th>It follows that</th></tr></thead>
-    <tbody>
-      <tr><td>The broker keeps no per-message state</td><td>Very high throughput; the broker does almost nothing but sequential I/O</td></tr>
-      <tr><td>Reading is non-destructive</td><td>Many consumer groups read the same data independently; <strong>replay</strong> is free</td></tr>
-      <tr><td>Data is deleted by <strong>retention policy</strong>, not by consumption</td><td>Keep 7 days, a year, or forever via compaction / tiered storage</td></tr>
-      <tr><td>There is no per-message ack at the broker</td><td><strong>No</strong> per-message retry, delay, priority or selective nack</td></tr>
-      <tr><td>Order only exists inside one log file</td><td>Order is guaranteed <strong>within a partition</strong> only</td></tr>
-      <tr><td>Nothing is indexed by content</td><td>You cannot ask for “messages where status=FAILED” — that is a database's job</td></tr>
-    </tbody>
-  </table></div>
-
-  <h3>How it compares</h3>
-  <div class="scroll"><table>
-    <thead><tr><th></th><th>Kafka</th><th>RabbitMQ</th><th>Pulsar</th><th>SQS</th></tr></thead>
-    <tbody>
-      <tr><td>Model</td><td>Log, consumer owns offset</td><td>Queue, broker owns per-message state</td><td>Log, storage split from compute (BookKeeper)</td><td>Managed queue, visibility timeout</td></tr>
-      <tr><td>After consumption</td><td>Data stays</td><td>Message is removed on ack</td><td>Data stays, removed by retention</td><td>Removed on delete</td></tr>
-      <tr><td>Replay</td><td>Native (reset offsets)</td><td>No</td><td>Native</td><td>No</td></tr>
-      <tr><td>Ordering</td><td>Per partition</td><td>Per queue, easily lost once consumers scale out</td><td>Per partition / per key</td><td>Standard: none · FIFO: per message group</td></tr>
-      <tr><td>Broker-side routing</td><td>None</td><td>Very strong (exchanges, topic, headers)</td><td>Yes</td><td>None</td></tr>
-      <tr><td>Per-message retry / delay</td><td>No (build it yourself)</td><td>Built in (DLX, TTL, delayed exchange)</td><td>Yes</td><td>Yes</td></tr>
-      <tr><td>Throughput</td><td>Very high</td><td>Moderate</td><td>High</td><td>Moderate, managed</td></tr>
-    </tbody>
-  </table></div>
-
-  <div class="callout">
-    <span class="tag">Answering “Kafka or RabbitMQ?”</span>
-    <p>Do not compare throughput. Compare the <strong>unit of state</strong>: Kafka tracks state as <em>a stream plus an offset</em>, RabbitMQ tracks it <em>per message</em>. If the problem needs control over individual messages — its own retry, its own delay, its own priority — you are fighting Kafka's design. If the problem needs one event stream that several consumers share and can replay, the opposite holds.</p>
-  </div>
-
-  <h3>When not to use Kafka</h3>
-  <ol>
-    <li><strong>Low-latency request/reply.</strong> Kafka is not RPC — use gRPC or HTTP.</li>
-    <li><strong>A task queue with per-task retry, delay and priority</strong> and a worker count that swings widely — RabbitMQ, SQS or Celery fit more naturally.</li>
-    <li><strong>Fan-out to end clients</strong> (mobile, browser, millions of connections). Kafka is not client-facing; it sits behind a WebSocket or push layer.</li>
-    <li><strong>Small scale, one consumer, no replay needed.</strong> Postgres with an outbox table, or a Redis stream, costs far less to operate.</li>
-    <li><strong>Querying by message content</strong>, or updating or deleting one specific message. That is a database.</li>
-    <li><strong>Scheduled or delayed delivery.</strong> Kafka has none natively — you would build tiered delay topics or an external scheduler.</li>
-  </ol>
-
-  <h3>Share Groups (KIP-932) — the 2026 talking point</h3>
-  <p>Share Groups reached production-ready status in Kafka 4.2. Interviews have started asking about this and many candidates have not caught up.</p>
-  <div class="scroll"><table>
-    <thead><tr><th></th><th>Consumer group</th><th>Share group</th></tr></thead>
-    <tbody>
-      <tr><td>Consumers reading one partition</td><td>Exactly one</td><td><strong>Many</strong></td></tr>
-      <tr><td>Unit of progress</td><td>An offset — a single cursor</td><td><strong>Per-record state</strong>: acquired / acknowledged / released</td></tr>
-      <tr><td>Parallelism ceiling</td><td>Partition count</td><td>Not bounded by partition count</td></tr>
-      <tr><td>Per-record redelivery</td><td>No</td><td>Yes, with a delivery count</td></tr>
-      <tr><td>Ordering</td><td>Yes (per partition)</td><td><strong>Given up</strong> — this is the trade</td></tr>
-    </tbody>
-  </table></div>
-  <p>A senior-level answer to “can Kafka replace RabbitMQ yet?”: <em>much closer since 4.2, but it still lacks broker-side routing and delayed delivery, and Share Groups trade ordering away to get parallelism.</em></p>
-
-  <h2>A partition is the unit of four things at once</h2>
+  <h2 id="m1">A partition is the unit of four things at once</h2>
   <p>A <strong>topic</strong> is purely logical — just a name; no file on disk is named after it. The <strong>partition</strong> is the real object: one log on disk, and simultaneously the unit of</p>
   <ol>
     <li>parallelism</li>
@@ -183,7 +95,7 @@ Topic: lab01.orders  Partition: 2  Leader: 1  Replicas: 1,2,3  Isr: 1,2,3</pre>
     </tbody>
   </table></div>
 
-  <h2 id="lab">Lab 01 — a three-broker KRaft cluster</h2>
+  <h2 id="lab01">Lab 01 — a three-broker KRaft cluster</h2>
   <p>In <code>labs/lab01/</code>: a <code>docker-compose.yml</code> (three nodes in combined mode plus Kafka UI) and five Python scripts.</p>
 <pre><span class="c"># bring the cluster up; all three nodes healthy in ~30-60s</span>
 docker compose up -d &amp;&amp; docker compose ps
@@ -207,23 +119,21 @@ pip install -r requirements.txt &amp;&amp; cd scripts</pre>
 
   <p><strong>The exercise that matters most</strong> — run <code>--alter --partitions 6</code>, re-run <code>02_produce_with_key.py</code>, compare the key-to-partition mapping before and after, and check it against what <code>05_key_remap.py</code> predicted. Then try shrinking back to 3 and read the error Kafka returns.</p>
 
-  <h2 id="questions">Interview questions — session 1</h2>
-  <p>Tick the ones you can answer fluently on your own. The senior-tier questions are the ones to write out and have graded.</p>
 
-  <ul class="qlist" id="qlist" data-store="m1-questions">
+  <h2 id="q-m1">Interview questions — module 1</h2>
+
+  <ul class="qlist" data-store="m1-questions">
     <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Define topic, partition, offset and replica, and the relationships between them.</span></label></li>
     <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Why can't the number of useful consumers in a group exceed the partition count?</span></label></li>
     <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is the message key for? What happens when it is null?</span></label></li>
     <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>What are the consequences of increasing the partition count on a live topic? Can you decrease it, and why not?</span></label></li>
     <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Read <code>Replicas: 2,3,1 · Isr: 2,3</code> — what does it tell you?</span></label></li>
-    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Kafka vs RabbitMQ: give the selection criteria without comparing throughput.</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Two groups read the same topic. Where is each group's progress kept, and how does Kafka keep them from interfering?</span></label></li>
     <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A topic has 3 partitions and you need 30 consumers working in parallel while preserving order per <code>user_id</code>. How? There is more than one answer — give the trade-offs of each.</span></label></li>
     <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>At what scope does Kafka guarantee ordering? Name three ways to lose it even with the key set correctly.</span></label></li>
     <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why is Kafka fast despite writing to disk? Answer at the mechanism level — don't stop at “sequential writes”.</span></label></li>
-    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>When would you advise a team <strong>against</strong> Kafka? Give three concrete situations.</span></label></li>
-    <li><label><input type="checkbox" data-q="11"><span class="qtext"><span class="lvl hard">Senior</span>How do Share Groups differ from consumer groups, and what do they trade away?</span></label></li>
   </ul>
-  <p class="qmeta" data-count-for="m1-questions">0 / 11</p>
+  <p class="qmeta" data-count-for="m1-questions">0 / 9</p>
 
   <hr>
   <p class="qmeta">Next module: <strong>M2 — Storage internals</strong>. Question 9 above is the bridge into it.</p>
