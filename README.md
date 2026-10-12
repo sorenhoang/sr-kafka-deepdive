@@ -12,7 +12,9 @@ Each module follows the same four steps:
    *what to watch for* so the behaviour is observed rather than read about.
 3. **Tiered questions** — Junior → Mid → Senior. Senior answers get written out and
    graded against *missing the point / correct but shallow / senior level*.
-4. **Answers** — written up under [`my-answers/`](my-answers/).
+4. **Answers** — the senior-tier questions get answered in writing and graded. Only
+   the polished model answer is committed, under `src/answers/`; the raw attempt, the
+   grade and the gap list stay local under `private/` (gitignored).
 
 ## Progress
 
@@ -40,16 +42,21 @@ src/                 notes source, one partial per module
   head.html          shared CSS and web fonts
   rail.html          sidebar navigation and module status
   modules/*.html     one file per module, assembled in filename order
+  answers/*.html     model answers to the senior-tier questions
   foot.html          partition calculator + checklist behaviour
-tools/build.py       assembles src/ into both outputs
+tools/build.py       assembles src/ (and private/src/) into the pages below
 docs/index.html      generated — standalone page for GitHub Pages
 dist/artifact.html   generated — page body without the HTML skeleton
 labs/lab01/          three-broker KRaft cluster + Python scripts
-my-answers/          written answers to the senior-tier questions
+private/             gitignored — raw answers, grades and gap notes, local only
 ```
 
-`docs/index.html` and `dist/artifact.html` are **generated**. Edit the partials under
-`src/`, never the generated files.
+`docs/index.html`, `dist/artifact.html` and everything directly under `private/` are
+**generated**. Edit the partials under `src/` and `private/src/`, never the generated
+files.
+
+`private/` is deliberately not committed: the raw answers and the list of what each one
+missed are only useful as a personal record, and this repository is public.
 
 ## Building the notes
 

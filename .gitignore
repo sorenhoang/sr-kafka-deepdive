@@ -11,3 +11,6 @@ venv/
 
 # Kafka lab state
 labs/*/kraft-combined-logs/
+
+# Raw interview answers, grades and gap notes — local only
+private/

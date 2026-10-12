@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
-"""Assemble the partials in src/ into two outputs:
+"""Assemble the HTML partials under src/ into the published pages.
 
-  docs/index.html    — standalone page for GitHub Pages (full doctype/head/body)
-  dist/artifact.html — page body only, for publishing as a Claude Artifact, which
-                       wraps the content in its own HTML skeleton
+Public output (committed):
+  docs/index.html    — standalone notes page for GitHub Pages
+  dist/artifact.html — same body without the HTML skeleton, for publishing as an
+                       Artifact, which supplies its own skeleton
 
-To add a module: create src/modules/NN-name.html and run this script again.
-Partials are assembled in filename order.
+Private output (gitignored):
+  private/<name>.html — one standalone page per file in private/src/, sharing the
+                        same stylesheet. Holds raw interview answers, grades and the
+                        gap list, which stay off GitHub.
+
+Adding a module: create src/modules/NN-name.html, add its entry to src/rail.html, and
+run this script. Partials are assembled in filename order; files under src/answers/ are
+appended after all modules.
 """
-import pathlib, sys
+import pathlib
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 
 SKELETON_HEAD = """<!doctype html>
-<html lang="vi">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -27,38 +35,51 @@ img{max-width:100%}
 </style>
 """
 
-def read(p):
-    return p.read_text(encoding="utf-8").rstrip() + "\n"
+
+def read(path):
+    return path.read_text(encoding="utf-8").rstrip() + "\n"
+
+
+def standalone(head, body, foot):
+    return SKELETON_HEAD + head + "</head>\n<body>\n" + body + "\n" + foot + "</body>\n</html>\n"
+
 
 def main():
-    modules = sorted((SRC / "modules").glob("*.html"))
-    if not modules:
-        sys.exit("src/modules/ is empty — nothing to assemble")
-
     head = read(SRC / "head.html")
     rail = read(SRC / "rail.html")
     foot = read(SRC / "foot.html")
-    main_html = "\n".join(read(m) for m in modules)
 
-    body = f'{rail}\n<main>\n{main_html}</main>\n'
-    shell = f'<div class="shell">\n{body}</div>\n'
+    modules = sorted((SRC / "modules").glob("*.html"))
+    if not modules:
+        sys.exit("src/modules/ is empty — nothing to assemble")
+    answers = sorted((SRC / "answers").glob("*.html")) if (SRC / "answers").is_dir() else []
 
-    # 1) artifact body: no HTML skeleton
+    parts = [read(p) for p in modules + answers]
+    shell = '<div class="shell">\n' + rail + "\n<main>\n" + "\n".join(parts) + "</main>\n</div>\n"
+
     (ROOT / "dist").mkdir(exist_ok=True)
     (ROOT / "dist" / "artifact.html").write_text(head + "\n" + shell + "\n" + foot, encoding="utf-8")
 
-    # 2) standalone page for GitHub Pages
     (ROOT / "docs").mkdir(exist_ok=True)
-    (ROOT / "docs" / "index.html").write_text(
-        SKELETON_HEAD + head + "</head>\n<body>\n" + shell + "\n" + foot + "</body>\n</html>\n",
-        encoding="utf-8",
-    )
+    (ROOT / "docs" / "index.html").write_text(standalone(head, shell, foot), encoding="utf-8")
 
-    print(f"built {len(modules)} module(s):")
-    for m in modules:
-        print(f"  - {m.name}")
-    print("  -> docs/index.html (GitHub Pages)")
-    print("  -> dist/artifact.html (Claude Artifact)")
+    print(f"public: {len(modules)} module(s), {len(answers)} answer set(s)")
+    for p in modules + answers:
+        print(f"  - {p.relative_to(SRC)}")
+    print("  -> docs/index.html")
+    print("  -> dist/artifact.html")
+
+    private_src = ROOT / "private" / "src"
+    if private_src.is_dir():
+        pages = sorted(private_src.glob("*.html"))
+        for page in pages:
+            body = '<main class="solo">\n' + read(page) + "</main>\n"
+            (ROOT / "private" / page.name).write_text(standalone(head, body, foot), encoding="utf-8")
+        if pages:
+            print(f"private: {len(pages)} page(s), not committed")
+            for page in pages:
+                print(f"  -> private/{page.name}")
+
 
 if __name__ == "__main__":
     main()
