@@ -4,6 +4,7 @@ Study log for working through Apache Kafka from fundamentals to internals, aimed
 senior backend / distributed systems interviews. Targets **Kafka 4.x (KRaft-only)**.
 
 **Notes site:** <https://sorenhoang.github.io/sr-kafka-deepdive/> — built from [`docs/`](docs/).
+**Quiz:** [`QUIZ.md`](QUIZ.md) — every question from every module, answers collapsed.
 
 Each module follows the same four steps:
 
@@ -49,20 +50,27 @@ src/                 notes source, one partial per module
   head.html          shared CSS and web fonts
   rail.html          sidebar navigation and module status
   modules/*.html     one file per module, assembled in filename order
-  answers/*.html     model answers to the senior-tier questions
+  quiz/*.json        the questions and their short answers — single source of truth
+  answers/*.html     long-form model answers to the senior-tier questions
   foot.html          partition calculator + checklist behaviour
 tools/build.py       assembles src/ (and private/src/) into the pages below
 docs/index.html      generated — standalone page for GitHub Pages
 dist/artifact.html   generated — page body without the HTML skeleton
+QUIZ.md              generated — all questions, answers behind <details> toggles
 labs/lab00-log-vs-queue/
                      Kafka and RabbitMQ side by side: consuming does not delete
 labs/lab01/          three-broker KRaft cluster + Python scripts
 private/             gitignored — raw answers, grades and gap notes, local only
 ```
 
-`docs/index.html`, `dist/artifact.html` and everything directly under `private/` are
-**generated**. Edit the partials under `src/` and `private/src/`, never the generated
-files.
+`docs/index.html`, `dist/artifact.html`, `QUIZ.md` and everything directly under
+`private/` are **generated**. Edit the sources under `src/` and `private/src/`, never the
+generated files.
+
+Each question exists once, in `src/quiz/NN-name.json`. The module page carries a
+`<!--QUIZ:NN-name-->` placeholder where the checklist is injected, and the same JSON
+produces that module's section of `QUIZ.md`, so a question and its answer cannot drift
+apart between the two.
 
 `private/` is deliberately not committed: the raw answers and the list of what each one
 missed are only useful as a personal record, and this repository is public.
@@ -73,8 +81,9 @@ missed are only useful as a personal record, and this repository is public.
 python3 tools/build.py
 ```
 
-Adding a module: drop `src/modules/NN-name.html` in place, add its entry to
-`src/rail.html`, and rebuild. Partials are plain HTML fragments — no templating engine,
+Adding a module: drop `src/modules/NN-name.html` in place with a `<!--QUIZ:NN-name-->`
+placeholder, write `src/quiz/NN-name.json` beside it, add an entry to `src/rail.html`,
+and rebuild. Partials are plain HTML fragments — no templating engine,
 no build dependencies beyond Python 3.
 
 ## Running a lab

@@ -303,9 +303,8 @@ docker exec lab00-rabbitmq rabbitmqctl list_queues name messages</pre>
 
   <p>The lab README carries four exercises. The one that matters most is the first: set <code>retention.ms=60000</code> and watch the records vanish with nobody consuming them — that is the proof that deletion is driven by retention and never by consumption.</p>
 
-  <h2 id="q-m0">Interview questions — module 0</h2>
-  <p>Junior and mid tiers answered fluently and ticked on 2026-10-13. The senior tier is written out and graded; the model answers are at the end of this page.</p>
-
+    <h2 id="q-m0">Interview questions — module 0</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
   <ul class="qlist" data-store="m0-questions">
     <li><label><input type="checkbox" data-q="1" checked><span class="qtext"><span class="lvl">Junior</span>Describe Kafka in one sentence. What is a consumer's unit of progress?</span></label></li>
     <li><label><input type="checkbox" data-q="2" checked><span class="qtext"><span class="lvl">Junior</span>Does a message disappear once it has been consumed? What actually decides when it is deleted?</span></label></li>
@@ -313,12 +312,13 @@ docker exec lab00-rabbitmq rabbitmqctl list_queues name messages</pre>
     <li><label><input type="checkbox" data-q="4" checked><span class="qtext"><span class="lvl">Mid</span>Kafka vs RabbitMQ: give the selection criteria without comparing throughput.</span></label></li>
     <li><label><input type="checkbox" data-q="5" checked><span class="qtext"><span class="lvl">Mid</span>Why does Kafka have no per-message retry, delay or priority? Tie it to the design rather than calling it a missing feature.</span></label></li>
     <li><label><input type="checkbox" data-q="6" checked><span class="qtext"><span class="lvl">Mid</span>Adding a new downstream consumer six months after launch: what does that cost in Kafka, and what does it cost in RabbitMQ?</span></label></li>
-    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>When would you advise a team <strong>against</strong> Kafka? Give three concrete situations.</span></label></li>
-    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>How do Share Groups (KIP-932) differ from consumer groups, and what do they trade away?</span></label></li>
+    <li><label><input type="checkbox" data-q="7" checked><span class="qtext"><span class="lvl hard">Senior · write it out</span>When would you advise a team against Kafka? Give three concrete situations.</span></label></li>
+    <li><label><input type="checkbox" data-q="8" checked><span class="qtext"><span class="lvl hard">Senior · write it out</span>How do Share Groups (KIP-932) differ from consumer groups, and what do they trade away?</span></label></li>
     <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A team needs delayed delivery — "retry this in 30 minutes" — on Kafka. Design it, and state what you give up.</span></label></li>
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Your company already runs RabbitMQ. A team wants to add Kafka for an event stream. Argue both sides of running two brokers.</span></label></li>
   </ul>
-  <p class="qmeta" data-count-for="m0-questions">0 / 10</p>
+  <p class="qmeta" data-count-for="m0-questions">8 / 10</p>
+
 
   <p class="eyebrow">Module 1</p>
   <h1>Core concepts</h1>
@@ -442,20 +442,21 @@ pip install -r requirements.txt &amp;&amp; cd scripts</pre>
   <p><strong>The exercise that matters most</strong> — run <code>--alter --partitions 6</code>, re-run <code>02_produce_with_key.py</code>, compare the key-to-partition mapping before and after, and check it against what <code>05_key_remap.py</code> predicted. Then try shrinking back to 3 and read the error Kafka returns.</p>
 
 
-  <h2 id="q-m1">Interview questions — module 1</h2>
-
+    <h2 id="q-m1">Interview questions — module 1</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
   <ul class="qlist" data-store="m1-questions">
     <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Define topic, partition, offset and replica, and the relationships between them.</span></label></li>
     <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Why can't the number of useful consumers in a group exceed the partition count?</span></label></li>
     <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is the message key for? What happens when it is null?</span></label></li>
     <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>What are the consequences of increasing the partition count on a live topic? Can you decrease it, and why not?</span></label></li>
-    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Read <code>Replicas: 2,3,1 · Isr: 2,3</code> — what does it tell you?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Read `Replicas: 2,3,1 · Isr: 2,3` — what does it tell you?</span></label></li>
     <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Two groups read the same topic. Where is each group's progress kept, and how does Kafka keep them from interfering?</span></label></li>
-    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A topic has 3 partitions and you need 30 consumers working in parallel while preserving order per <code>user_id</code>. How? There is more than one answer — give the trade-offs of each.</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A topic has 3 partitions and you need 30 consumers working in parallel while preserving order per user_id. How? Give the trade-offs of each option.</span></label></li>
     <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>At what scope does Kafka guarantee ordering? Name three ways to lose it even with the key set correctly.</span></label></li>
-    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why is Kafka fast despite writing to disk? Answer at the mechanism level — don't stop at “sequential writes”.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why is Kafka fast despite writing to disk? Answer at the mechanism level.</span></label></li>
   </ul>
   <p class="qmeta" data-count-for="m1-questions">0 / 9</p>
+
 
   <hr>
   <p class="qmeta">Next module: <strong>M2 — Storage internals</strong>. Question 9 above is the bridge into it.</p>

@@ -120,20 +120,7 @@ pip install -r requirements.txt &amp;&amp; cd scripts</pre>
   <p><strong>The exercise that matters most</strong> — run <code>--alter --partitions 6</code>, re-run <code>02_produce_with_key.py</code>, compare the key-to-partition mapping before and after, and check it against what <code>05_key_remap.py</code> predicted. Then try shrinking back to 3 and read the error Kafka returns.</p>
 
 
-  <h2 id="q-m1">Interview questions — module 1</h2>
-
-  <ul class="qlist" data-store="m1-questions">
-    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Define topic, partition, offset and replica, and the relationships between them.</span></label></li>
-    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Why can't the number of useful consumers in a group exceed the partition count?</span></label></li>
-    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is the message key for? What happens when it is null?</span></label></li>
-    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>What are the consequences of increasing the partition count on a live topic? Can you decrease it, and why not?</span></label></li>
-    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Read <code>Replicas: 2,3,1 · Isr: 2,3</code> — what does it tell you?</span></label></li>
-    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Two groups read the same topic. Where is each group's progress kept, and how does Kafka keep them from interfering?</span></label></li>
-    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A topic has 3 partitions and you need 30 consumers working in parallel while preserving order per <code>user_id</code>. How? There is more than one answer — give the trade-offs of each.</span></label></li>
-    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>At what scope does Kafka guarantee ordering? Name three ways to lose it even with the key set correctly.</span></label></li>
-    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why is Kafka fast despite writing to disk? Answer at the mechanism level — don't stop at “sequential writes”.</span></label></li>
-  </ul>
-  <p class="qmeta" data-count-for="m1-questions">0 / 9</p>
+  <!--QUIZ:01-core-concepts-->
 
   <hr>
   <p class="qmeta">Next module: <strong>M2 — Storage internals</strong>. Question 9 above is the bridge into it.</p>
