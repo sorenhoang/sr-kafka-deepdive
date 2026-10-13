@@ -1,0 +1,49 @@
+  <h2 id="a-m0">Model answers — module 0</h2>
+  <p>Senior-tier answers at the depth an interview is looking for. Written after the attempt, never before.</p>
+
+  <h3>Q7 · When would you advise a team against Kafka?</h3>
+  <p>Three situations, each tied back to the same design decision — the broker stores a log and keeps no per-message state.</p>
+  <ol>
+    <li><strong>Low-latency request/reply.</strong> Kafka is not RPC. A round trip through a log adds producer batching, replication and consumer poll latency, and the model gives you no correlation or timeout semantics — you would rebuild them. Use gRPC or HTTP.</li>
+    <li><strong>Work that needs per-task control</strong> — its own retry schedule, its own delay, a priority, a dead-letter path — especially with a worker count that swings. The broker tracks nothing per message, so all of that machinery becomes yours to build and operate. RabbitMQ and SQS give it natively. Share Groups (4.2) narrow this gap but do not close it: there is still no broker-side routing and no delayed delivery.</li>
+    <li><strong>Small scale, one consumer, no replay requirement.</strong> The decisive cost here is operational rather than technical: a cluster to run, metrics to watch, partition counts that cannot be undone, and somebody who can diagnose a shrinking ISR at 2am. A Postgres outbox table or a Redis stream is proportionate to the problem.</li>
+  </ol>
+  <p>Three more worth having ready: fan-out to end clients (Kafka is not client-facing — it sits behind a WebSocket or push tier); querying or mutating a specific message by its content (that is a database); and scheduled or delayed delivery, which Kafka has no native answer for.</p>
+
+  <h3>Q8 · Share Groups vs consumer groups, and what they trade away</h3>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Consumer group</th><th>Share group</th></tr></thead>
+    <tbody>
+      <tr><td>Unit of distribution</td><td>Partition</td><td><strong>Record</strong></td></tr>
+      <tr><td>Consumers per partition</td><td>Exactly one</td><td>Many</td></tr>
+      <tr><td>Parallelism ceiling</td><td>Partition count</td><td>Not bounded by partitions</td></tr>
+      <tr><td>Progress tracked as</td><td>One committed offset per partition</td><td>Per-record state: acquired → acknowledged / released / rejected</td></tr>
+      <tr><td>Redelivery</td><td>Only by replaying from an offset</td><td>Per record, with a delivery count and an acquisition lock timeout</td></tr>
+      <tr><td>Ordering</td><td>Guaranteed per partition</td><td>None</td></tr>
+    </tbody>
+  </table></div>
+  <p>The trade is usually stated as “you give up ordering”, which is true but incomplete. The deeper trade is that <strong>the broker now keeps per-record state</strong> — exactly the thing Kafka refused to do in order to stay fast. A consumer group costs the broker one integer per partition; a share group costs it a state machine per in-flight record, plus the lock timeouts that go with it. Share groups buy queue semantics by giving back the property that made the log cheap to serve.</p>
+  <p>So the selection rule is unchanged in shape: use a share group when the work is independent per record and you need more parallelism than you have partitions, and a consumer group when the order of related records is part of the contract.</p>
+
+  <h3>Q9 · Delayed delivery on Kafka</h3>
+  <p><strong>Why the obvious design does not work.</strong> “Publish to a delay topic, read it, check the timestamp, and process once 30 minutes have passed” breaks on the first record. A partition is a sequential log and a consumer cannot skip its head: if the record at the head is due in 29 minutes, every record behind it waits too, however ready they are. That is head-of-line blocking, and it is the whole difficulty of the problem. Sleeping inside the poll loop makes it worse — exceeding <code>max.poll.interval.ms</code> gets the consumer evicted and triggers a rebalance.</p>
+  <p><strong>A design that holds up.</strong> Tiered delay topics, one per granularity — <code>delay-5s</code>, <code>delay-1m</code>, <code>delay-5m</code>, <code>delay-30m</code>. Each carries records whose remaining wait is roughly uniform, which bounds head-of-line blocking to that tier's granularity. A consumer per tier reads the head record and computes its due time:</p>
+  <ul>
+    <li>Not due → <code>consumer.pause()</code> the partition and <code>seek()</code> back to that offset, then keep calling <code>poll()</code> so heartbeats continue; resume when the remaining time has elapsed. Never <code>sleep()</code> inside the loop.</li>
+    <li>Due → republish to the next smaller tier, or to the destination topic when the remaining delay fits.</li>
+  </ul>
+  <p><strong>What it costs.</strong> Ordering is gone along the delay path. Retention on every delay topic has to exceed the maximum delay, or the message expires before it fires. Republishing means at-least-once, so the terminal consumer has to be idempotent. Delay precision is bounded by tier granularity plus one poll interval. And it is a topic, a consumer group and a dashboard per tier, forever.</p>
+  <p><strong>The alternative worth naming.</strong> Keep the schedule in a database — a row with a <code>due_at</code> column and a poller that publishes to the destination topic when the time comes. “Find the rows that are due now” is a query a database is built for and a log is not. It is less clever, has no head-of-line blocking, and is usually the right answer unless the delay volume is large enough to make the database the bottleneck.</p>
+
+  <h3>Q10 · Already running RabbitMQ — should a team add Kafka?</h3>
+  <p><strong>For.</strong> An event stream is a different problem from task dispatch. Modelling it on a queue forces the consumer list to be decided at publish time, because an exchange has to copy each message into one queue per consumer; a consumer that appears six months later sees nothing that came before it. In Kafka that consumer is a new group reading from offset 0, at no cost to anyone already running. Reprocessing after a bug is the same mechanism rather than a data-recovery project. And retention stops being a liability to manage and becomes the feature the design rests on.</p>
+  <p><strong>Against.</strong> Two brokers is two sets of operational knowledge, two failure modes, two upgrade paths, two monitoring stacks and two on-call runbooks — a cost paid continuously by everyone, not once by the team that wanted it. Kafka's failure modes are also unfamiliar in a way that bites: a shrinking ISR, rebalance storms, consumer lag that means something other than a slow consumer, and a partition count that cannot be lowered once chosen.</p>
+  <p><strong>The option that usually goes unexamined.</strong> RabbitMQ has had <a href="https://www.rabbitmq.com/docs/streams">Streams</a> since 3.9 — an append-only, replicated log with consumer-controlled offsets and replay, with superstreams adding partitioning. If what the team actually needs is replay and multiple independent readers, that may already be available on the broker in production today. Establishing whether it is should come before any comparison of Kafka against RabbitMQ queues, because that comparison answers the wrong question.</p>
+  <p><strong>How to decide.</strong> The senior move is to name a test rather than a preference. Add Kafka when all four hold:</p>
+  <ol>
+    <li>More than one independent consumer of the same data exists today, not hypothetically.</li>
+    <li>Replay or reprocessing is a stated requirement, not a nice-to-have.</li>
+    <li>The event history itself has value beyond the processing of it.</li>
+    <li>Somebody will own it operationally, by name, with a runbook.</li>
+  </ol>
+  <p>If RabbitMQ Streams satisfies the first three, the answer is no. If fewer than three hold at all, the answer is to use what you already run — the scarce resource is operational attention, not throughput.</p>
