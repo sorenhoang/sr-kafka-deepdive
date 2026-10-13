@@ -147,6 +147,9 @@ def main():
     (ROOT / "dist" / "artifact.html").write_text(head + "\n" + shell + "\n" + foot, encoding="utf-8")
     (ROOT / "docs").mkdir(exist_ok=True)
     (ROOT / "docs" / "index.html").write_text(standalone(head, shell, foot), encoding="utf-8")
+    # Serve docs/ verbatim instead of running it through Jekyll, which would skip any
+    # file or directory whose name starts with an underscore.
+    (ROOT / "docs" / ".nojekyll").touch()
 
     ordered = [quizzes[s] for s in sorted(quizzes)]
     (ROOT / "QUIZ.md").write_text(quiz_markdown(ordered), encoding="utf-8")
