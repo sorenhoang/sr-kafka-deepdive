@@ -79,7 +79,8 @@ no build dependencies beyond Python 3.
 ```bash
 cd labs/lab00-log-vs-queue        # or labs/lab01
 docker compose up -d && docker compose ps     # wait for every node to be healthy
-python -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate                     # once per terminal
 pip install -r requirements.txt
 ```
 

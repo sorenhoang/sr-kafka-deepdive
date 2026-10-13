@@ -55,10 +55,18 @@ Topic: lab01.orders  Partition: 2  Leader: 1  Replicas: 1,2,3  Isr: 1,2,3
 ## 2. Install the Python client
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+cd labs/lab01                     # requirements.txt lives here, not in scripts/
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 cd scripts
 ```
+
+> `source .venv/bin/activate` applies to **one terminal**. This lab asks you to open
+> several at once for `03_consumer_group.py`, and each one needs its own `activate`, or
+> `python3` falls back to the system interpreter and the imports fail with
+> `ModuleNotFoundError: No module named 'confluent_kafka'`. Check with `which python3` —
+> it should print a path inside `.venv`.
 
 ## 3. Run the scripts
 

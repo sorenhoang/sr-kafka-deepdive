@@ -24,10 +24,17 @@ docker exec lab00-kafka /opt/kafka/bin/kafka-topics.sh \
 ```
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+cd labs/lab00-log-vs-queue        # requirements.txt lives here, not in scripts/
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 cd scripts
 ```
+
+> `source .venv/bin/activate` applies to **one terminal**. Every new tab or window needs
+> it again, or `python3` falls back to the system interpreter and the imports fail with
+> `ModuleNotFoundError: No module named 'confluent_kafka'`. Check with `which python3` —
+> it should print a path inside `.venv`.
 
 ## 1. Publish to both
 
