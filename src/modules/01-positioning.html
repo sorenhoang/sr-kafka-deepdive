@@ -89,15 +89,15 @@ docker exec lab00-rabbitmq rabbitmqctl list_queues name messages</pre>
   <p>The lab README carries four exercises. The one that matters most is the first: set <code>retention.ms=60000</code> and watch the records vanish with nobody consuming them — that is the proof that deletion is driven by retention and never by consumption.</p>
 
   <h2 id="q-m0">Interview questions — module 0</h2>
-  <p>Tick what you can answer fluently. The senior tier gets written out and graded.</p>
+  <p>Junior and mid tiers answered fluently and ticked on 2026-10-13. The senior tier is written out and graded; the model answers are at the end of this page.</p>
 
   <ul class="qlist" data-store="m0-questions">
-    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Describe Kafka in one sentence. What is a consumer's unit of progress?</span></label></li>
-    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Does a message disappear once it has been consumed? What actually decides when it is deleted?</span></label></li>
-    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>Name two things a message queue gives you that Kafka does not.</span></label></li>
-    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Kafka vs RabbitMQ: give the selection criteria without comparing throughput.</span></label></li>
-    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Why does Kafka have no per-message retry, delay or priority? Tie it to the design rather than calling it a missing feature.</span></label></li>
-    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Adding a new downstream consumer six months after launch: what does that cost in Kafka, and what does it cost in RabbitMQ?</span></label></li>
+    <li><label><input type="checkbox" data-q="1" checked><span class="qtext"><span class="lvl">Junior</span>Describe Kafka in one sentence. What is a consumer's unit of progress?</span></label></li>
+    <li><label><input type="checkbox" data-q="2" checked><span class="qtext"><span class="lvl">Junior</span>Does a message disappear once it has been consumed? What actually decides when it is deleted?</span></label></li>
+    <li><label><input type="checkbox" data-q="3" checked><span class="qtext"><span class="lvl">Junior</span>Name two things a message queue gives you that Kafka does not.</span></label></li>
+    <li><label><input type="checkbox" data-q="4" checked><span class="qtext"><span class="lvl">Mid</span>Kafka vs RabbitMQ: give the selection criteria without comparing throughput.</span></label></li>
+    <li><label><input type="checkbox" data-q="5" checked><span class="qtext"><span class="lvl">Mid</span>Why does Kafka have no per-message retry, delay or priority? Tie it to the design rather than calling it a missing feature.</span></label></li>
+    <li><label><input type="checkbox" data-q="6" checked><span class="qtext"><span class="lvl">Mid</span>Adding a new downstream consumer six months after launch: what does that cost in Kafka, and what does it cost in RabbitMQ?</span></label></li>
     <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>When would you advise a team <strong>against</strong> Kafka? Give three concrete situations.</span></label></li>
     <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>How do Share Groups (KIP-932) differ from consumer groups, and what do they trade away?</span></label></li>
     <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A team needs delayed delivery — "retry this in 30 minutes" — on Kafka. Design it, and state what you give up.</span></label></li>

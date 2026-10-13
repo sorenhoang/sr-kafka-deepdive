@@ -22,9 +22,12 @@ Each module follows the same four steps:
 count: a module is finished when its lab has actually been run and its senior-tier
 questions have been answered and graded.
 
+M0 is complete: lab 00 run, junior and mid tiers self-assessed, Q7-Q9 answered and
+graded, Q10 answered from the model rather than attempted cold — worth retrying in M13.
+
 | Module | Topic | Material | Lab run | Questions graded |
 |---|---|:--:|:--:|:--:|
-| M0 | Positioning: log vs queue, when not to use Kafka, Share Groups | ready | | |
+| M0 | Positioning: log vs queue, when not to use Kafka, Share Groups | ready | ✅ | ✅ |
 | M1 | Topic, partition, offset, replica, consumer group, ordering | ready | | |
 | M2 | Storage internals: segments, page cache, zero-copy, compaction | | | |
 | M3 | Replication, ISR, LEO vs high watermark, unclean leader election | | | |
