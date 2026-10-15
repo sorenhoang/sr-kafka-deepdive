@@ -1,0 +1,241 @@
+  <p class="backlink"><a href="index.html">← Kafka Deep Dive</a></p>
+  <p class="eyebrow">Module 2 · lab worksheet</p>
+  <h1>Lab 02 — What a partition looks like on disk</h1>
+  <p class="lede">Six steps. Module 1 said a partition is a log on disk; here you open that log, split it into segments, read its index, fail to delete from it, fix that, and compact it by key. Predict before every command — being wrong about step 3 in particular is the point of step 3.</p>
+  <p class="qmeta">Expect 45-60 minutes. One broker — storage is a per-partition, per-broker concern.</p>
+
+  <ul class="labtrack qlist" data-store="lab02-steps" style="margin:22px 0">
+    <li><label><input type="checkbox" data-q="1"><span>1 · Roll segments, read their names</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span>2 · Dump the sparse index</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span>3 · The retention trap</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span>4 · Fix it, watch data go</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span>5 · Compaction and offset gaps</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span>6 · Cold vs warm read</span></label></li>
+  </ul>
+
+  <h2>Setup</h2>
+<pre>cd labs/lab02-storage
+docker compose up -d &amp;&amp; docker compose ps     <span class="c"># healthy in ~30s</span>
+
+python3 -m venv .venv
+source .venv/bin/activate                     <span class="c"># once per terminal</span>
+pip install -r requirements.txt
+cd scripts</pre>
+  <p>Two broker settings are turned down so you are not waiting around: <code>log.retention.check.interval.ms</code> to 10s (default 5 minutes) and <code>log.cleaner.backoff.ms</code> to 5s. Production leaves both alone — and knowing they exist is half of why retention looks slow in real clusters.</p>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 1</span>Roll some segments and read their names</h3>
+    <p><strong>Proves:</strong> a partition is a directory of segments, and the filename is the index into them.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>The topic will be created with <code>segment.bytes=1024</code>, then given 200 records of about 100 bytes each. Roughly how many <code>.log</code> files do you expect? And what do you think decides each file's <em>name</em>?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+  --create --topic lab02.segments --partitions 1 --replication-factor 1 \
+  --config segment.bytes=1024
+
+python3 01_fill_segments.py 200 100
+
+docker exec lab02-kafka ls -la /tmp/kraft-combined-logs/lab02.segments-0/</pre>
+
+    <h4>Expected</h4>
+<pre>00000000000000000000.index
+00000000000000000000.log
+00000000000000000000.timeindex
+00000000000000000009.index
+00000000000000000009.log
+00000000000000000009.timeindex
+...
+00000000000000000193.log        <span class="c"># the active segment</span>
+leader-epoch-checkpoint
+partition.metadata</pre>
+    <p>The exact offsets depend on how batching fell out on your run — the producer writes batches, and a segment rolls when the batch that would exceed <code>segment.bytes</code> arrives. The shape is what matters: many triples, each named after the offset it starts at.</p>
+
+    <h4>Why</h4>
+    <p>The name is the segment's <strong>base offset</strong>, zero-padded to 20 digits so that lexical order equals numeric order. To find offset 400, the broker binary-searches this list of names and picks the segment whose base offset is the largest one not greater than 400 — without opening a single file. Zero-padding is what makes a plain string sort do that correctly.</p>
+    <p>Only the last segment is open for writing. It is the <strong>active segment</strong>, and it is the one that steps 3 and 5 keep running into.</p>
+
+    <h4>Check yourself</h4>
+    <p>Production defaults are <code>segment.bytes=1 GiB</code> and <code>segment.ms=7 days</code>. On a topic receiving 10 records a minute at 200 bytes each, which limit rolls the segment, and how long does that take?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 2</span>Dump the log and its index</h3>
+    <p><strong>Proves:</strong> the index is sparse, and records are stored as batches rather than individually.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>A segment holds about 10 records here. How many entries do you expect in its <code>.index</code> — ten, or fewer? And in the <code>.log</code> dump, will you see 10 separate records or something else?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-dump-log.sh \
+  --files /tmp/kraft-combined-logs/lab02.segments-0/00000000000000000000.log \
+  --print-data-log | head -20
+
+docker exec lab02-kafka /opt/kafka/bin/kafka-dump-log.sh \
+  --files /tmp/kraft-combined-logs/lab02.segments-0/00000000000000000000.index</pre>
+
+    <h4>Expected</h4>
+    <p>The log dump shows <code>baseOffset</code>, <code>lastOffset</code>, <code>count</code>, <code>producerId</code>, <code>isTransactional</code>, <code>compresscodec</code> — these are <strong>batch</strong> headers, with the records nested inside. The index dump shows very few entries, often zero or one for a segment this small.</p>
+
+    <h4>Why</h4>
+    <p>An index entry is written roughly every <code>log.index.interval.bytes</code> (4 KiB) of log, not per record — and a 1 KiB segment never reaches 4 KiB, so it may have no entries at all beyond the implicit base. Resolving an offset therefore ends in a short forward scan through the <code>.log</code>, by design.</p>
+    <p>Why not index every record? These files are memory-mapped, so a dense index competes for exactly the page-cache memory that makes reads fast. Trading a few microseconds of scan for cache headroom is the right call, and it is a good answer to give when asked why the lookup is not O(1).</p>
+    <p>The batch headers are the other half of the lesson: <code>producerId</code> is the idempotent producer (M5) and <code>isTransactional</code> is exactly-once (M7). The broker stores what the producer framed, untouched.</p>
+
+    <h4>Check yourself</h4>
+    <p>Dump the <code>.timeindex</code> as well. Given what it maps, which CLI operation would be impossible without it?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 3</span>The retention trap</h3>
+    <p><strong>Proves:</strong> retention deletes whole segments and never the active one. This is the most common Kafka support question there is.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>You are about to create a topic with <code>retention.ms=30000</code> — thirty seconds — write a handful of records, and wait two minutes. How many records will still be readable? Write the number down before running it.</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+  --create --topic lab02.trap --partitions 1 --replication-factor 1 \
+  --config retention.ms=30000
+
+python3 01_fill_segments.py 20 100
+<span class="c"># ^ edit TOPIC in the script, or just produce with the console producer:</span>
+<span class="c">#   docker exec -i lab02-kafka /opt/kafka/bin/kafka-console-producer.sh \</span>
+<span class="c">#     --bootstrap-server localhost:19092 --topic lab02.trap</span>
+
+<span class="c"># wait two minutes, then ask where the log starts and ends</span>
+docker exec lab02-kafka /opt/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+  --bootstrap-server localhost:19092 --topic lab02.trap --time -2    <span class="c"># earliest</span>
+docker exec lab02-kafka /opt/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+  --bootstrap-server localhost:19092 --topic lab02.trap --time -1    <span class="c"># latest</span>
+
+docker exec lab02-kafka ls -la /tmp/kraft-combined-logs/lab02.trap-0/</pre>
+
+    <h4>Expected</h4>
+    <p>Earliest offset is still 0. Nothing has been deleted, minutes after every record became eligible. One <code>.log</code> file, still the active one.</p>
+
+    <h4>Why</h4>
+    <p>Retention operates on <strong>closed segments</strong>. The active segment is never deleted, and on this topic it has not rolled because rolling needs <code>segment.bytes</code> (1 GiB) or <code>segment.ms</code> (7 days) — neither of which twenty small records will reach. Every record is eligible for deletion and none of them can go, because they share a file with records that are not.</p>
+    <p>The correct mental model: <strong>retention is a floor on how long data lives, never a ceiling.</strong> The real guarantee is "at least <code>retention.ms</code>, plus up to one segment's worth of time, plus up to one <code>log.retention.check.interval.ms</code>". Teams that promise regulators a deletion deadline on the basis of <code>retention.ms</code> alone are promising something Kafka does not do.</p>
+
+    <h4>Check yourself</h4>
+    <p>A compliance requirement says personal data must be gone within 24 hours. What do you set, and what do you tell the compliance team the actual upper bound is?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 4</span>Fix it and watch the data go</h3>
+    <p><strong>Proves:</strong> segment rolling is the missing half of retention.</p>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:19092 \
+  --alter --entity-type topics --entity-name lab02.trap \
+  --add-config segment.ms=20000
+
+<span class="c"># produce a few more records so a roll actually happens, then wait ~60s</span>
+docker exec lab02-kafka /opt/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+  --bootstrap-server localhost:19092 --topic lab02.trap --time -2</pre>
+
+    <h4>Expected</h4>
+    <p>Earliest offset moves forward from 0 — the old segment closed, aged past 30 seconds, and was deleted. The log now starts partway in.</p>
+
+    <h4>Why</h4>
+    <p>Nothing about <code>retention.ms</code> changed. All that changed is that segments now close, which is what makes them eligible. This is worth internalising as a pair: <strong>every retention setting needs a segment setting that lets it act.</strong></p>
+    <p>Notice too that the earliest offset moved rather than the records being renumbered. Offsets are immutable; deleting from the front moves the log's start, which is why a consumer with a committed offset below the new earliest gets an <code>OFFSET_OUT_OF_RANGE</code> and falls back to <code>auto.offset.reset</code> — silently skipping data if that is set to <code>latest</code>.</p>
+
+    <h4>Check yourself</h4>
+    <p>A consumer group was down for a week on a topic with 3-day retention. It restarts with <code>auto.offset.reset=latest</code>. What happens, and what would <code>earliest</code> have done instead? Which is the safer default and why is it not the obvious one?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 5</span>Compaction, tombstones and offset gaps</h3>
+    <p><strong>Proves:</strong> compaction keeps the newest value per key, leaves holes in the offset sequence, and never touches the active segment.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Four keys, three versions each, plus a tombstone for <code>user-2</code> — thirteen records at offsets 0 to 12. After compaction, how many records survive, and <em>what offsets do they have</em>? That second half is the interesting one.</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+  --create --topic lab02.compacted --partitions 1 --replication-factor 1 \
+  --config cleanup.policy=compact \
+  --config segment.bytes=1024 \
+  --config min.cleanable.dirty.ratio=0.01 \
+  --config min.compaction.lag.ms=0 \
+  --config delete.retention.ms=10000
+
+python3 02_compaction_demo.py
+
+<span class="c"># the cleaner only works on closed segments — force a roll</span>
+docker exec lab02-kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:19092 \
+  --alter --entity-type topics --entity-name lab02.compacted \
+  --add-config segment.ms=5000
+
+<span class="c"># produce one more record to trigger the roll, wait ~30s, then look</span>
+docker exec lab02-kafka ls /tmp/kraft-combined-logs/lab02.compacted-0/
+docker exec lab02-kafka /opt/kafka/bin/kafka-dump-log.sh \
+  --files /tmp/kraft-combined-logs/lab02.compacted-0/00000000000000000000.log \
+  --print-data-log | grep -E 'offset:|payload'</pre>
+
+    <h4>Expected</h4>
+    <p>Only the newest value per key survives, and <code>user-2</code> is gone once its tombstone passes <code>delete.retention.ms</code>. The surviving records keep their <strong>original offsets</strong>, so the sequence reads something like 8, 10, 11 — with gaps where the superseded records used to be.</p>
+
+    <h4>Why</h4>
+    <p>Compaction rewrites segments and drops superseded records, but it never renumbers. An offset identifies a position in the log forever, and consumers have committed against those numbers. The consequence for consumer code: <strong>anything assuming offset+1, or counting records to infer progress, is wrong on a compacted topic.</strong></p>
+    <p>A tombstone is a record with a null value. It marks the key deleted and survives for <code>delete.retention.ms</code> (default 24 h) so consumers have a window to observe the deletion — then it disappears with the key. A consumer offline longer than that window never learns the key was deleted and keeps a stale value indefinitely. That is a real correctness bug in cache-invalidation and CDC pipelines, and the usual answer is a periodic full rebuild rather than trusting incremental state.</p>
+    <p>Finally: the active segment is never compacted, so the head of the log always holds uncompacted duplicates. Compaction is eventual. A consumer at the head sees every version; one starting from the tail sees only the latest.</p>
+
+    <h4>Check yourself</h4>
+    <p><code>__consumer_offsets</code> is a compacted topic. Given what compaction converges to, explain in one sentence why that is the right choice for it — and why a topic of order events would be the wrong choice.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 6</span>Cold versus warm read</h3>
+    <p><strong>Proves:</strong> reads are served from the page cache, not from disk — and the honest version of what that means on a laptop.</p>
+
+    <h4>Run</h4>
+<pre>python3 03_read_timing.py lab02.segments</pre>
+
+    <h4>Expected</h4>
+    <p>Two passes with similar timings. That is not a failed experiment — it is the result. The data was written moments ago and never left the page cache, so neither pass touched a disk.</p>
+
+    <h4>Why</h4>
+    <p>Kafka does not maintain its own cache. Writes land in the OS page cache and are not fsynced per record (<code>log.flush.interval.messages</code> defaults to effectively never); durability comes from replication to other brokers rather than from reaching the platter. Reads of recent data come back out of that same cache and are sent with <code>sendfile</code> — kernel straight to socket, no copy into user space, no deserialisation.</p>
+    <p>Two consequences worth being able to state: a broker <em>process</em> crash loses nothing because the cache belongs to the kernel, while a <em>machine</em> power loss can lose unflushed data on that broker — which is exactly why durability is <code>acks=all</code> plus <code>min.insync.replicas</code>, and why M3 exists. And the JVM heap stays small, so a broker serving terabytes runs on a few gigabytes of heap with GC off the request path.</p>
+    <p>To see a genuinely cold read you would need to evict the cache (<code>echo 3 &gt; /proc/sys/vm/drop_caches</code> on a Linux host) or read data old enough to have been evicted naturally. Not worth doing inside Docker on a laptop; knowing <em>why</em> the two numbers match is the takeaway.</p>
+
+    <h4>Check yourself</h4>
+    <p>Your cluster enables TLS. What happens to the <code>sendfile</code> path, and what should you expect to see in broker CPU and throughput? (This is the standard follow-up after a candidate says "zero-copy".)</p>
+  </div>
+
+  <h2>Tear down</h2>
+<pre>docker compose down -v</pre>
+
+  <h2>When something goes wrong</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+    <tbody>
+      <tr><td>Only one <code>.log</code> file after step 1</td><td>The records were smaller than expected or batched into one write. Run <code>python3 01_fill_segments.py 500 200</code> for more volume.</td></tr>
+      <tr><td><code>.index</code> dump is empty</td><td>Correct — a segment under 4 KiB produces no index entries. That is step 2's point; use a larger segment to see entries.</td></tr>
+      <tr><td>Compaction never happens</td><td>The cleaner only touches closed segments. Force a roll with <code>segment.ms</code> and produce one more record, then wait for <code>log.cleaner.backoff.ms</code>.</td></tr>
+      <tr><td>Tombstone still visible</td><td>It survives <code>delete.retention.ms</code> by design — 10s here, 24h by default.</td></tr>
+      <tr><td>Retention still not deleting after step 4</td><td>No roll happened yet. Produce a record after setting <code>segment.ms</code>; a roll is triggered on write, not by a timer alone.</td></tr>
+      <tr><td><code>ModuleNotFoundError</code></td><td>The venv is not active in this terminal. <code>source .venv/bin/activate</code>, confirm with <code>which python3</code>.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Done when</h2>
+  <p>You can answer these without looking anything up: what the segment filename is and why it is zero-padded; why the index is sparse; why a 30-second retention deleted nothing; what offsets look like after compaction and what that breaks in consumer code; and when Kafka loses zero-copy. The last one is the question interviewers reach for immediately after you say the words.</p>

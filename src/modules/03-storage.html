@@ -1,0 +1,115 @@
+  <p class="eyebrow">Module 2</p>
+  <h1>Storage internals</h1>
+  <p class="lede">The module that turns "Kafka is fast because sequential writes" into four separate mechanisms you can defend one at a time — and then shows what deletes data, which is where production surprises actually come from.</p>
+
+  <h2 id="m2">The log is a directory of segments</h2>
+  <p>A partition is a directory named <code>&lt;topic&gt;-&lt;partition&gt;</code>. Inside it, the log is split into <strong>segments</strong>, each a trio of files sharing a name:</p>
+<pre>lab02.segments-0/
+  00000000000000000000.log        <span class="c"># records</span>
+  00000000000000000000.index      <span class="c"># offset   -> byte position</span>
+  00000000000000000000.timeindex  <span class="c"># timestamp -> offset</span>
+  00000000000000000317.log        <span class="c"># next segment, starts at offset 317</span>
+  00000000000000000317.index
+  00000000000000000317.timeindex</pre>
+  <p>The filename is the segment's <strong>base offset</strong>, zero-padded to 20 digits. That is not decoration: it is the index. To find offset 400, the broker binary-searches the <em>filenames</em> to pick the segment, with no file opened yet.</p>
+  <p>Only the newest segment — the <strong>active segment</strong> — is open for writing. It rolls when either limit is hit: <code>segment.bytes</code> (default 1 GiB) or <code>segment.ms</code> (default 7 days). Remember both; the second one is the cause of the most common retention bug, below.</p>
+
+  <h3>How a read resolves an offset</h3>
+  <ol>
+    <li>Binary search the segment filenames → the segment containing the offset.</li>
+    <li>Look up the <code>.index</code> → the nearest indexed offset at or below the target, giving a byte position.</li>
+    <li>Scan forward in the <code>.log</code> from there to the exact record.</li>
+  </ol>
+  <p>The index is deliberately <strong>sparse</strong>: one entry roughly every <code>log.index.interval.bytes</code> (default 4 KiB) of log, not one per record. Dense would make lookups marginally faster and cost memory proportional to record count — and these files are memory-mapped, so the index competes with the page cache for exactly the memory that makes reads fast. Sparse plus a short forward scan is the better trade, and it is why the final step is a scan rather than a direct hit.</p>
+  <p><code>.timeindex</code> does the same for timestamps, which is what makes <code>--to-datetime</code> offset resets and time-based seeks possible.</p>
+
+  <h3>The batch is the unit, not the record</h3>
+  <p>Records are stored in <strong>record batches</strong> exactly as the producer framed them — <code>baseOffset</code>, <code>lastOffsetDelta</code>, <code>producerId</code>, <code>isTransactional</code>, then the compressed records. Compression is applied per batch, so a batch of 500 similar records compresses far better than 500 individually; this is why <code>linger.ms</code> affects your storage bill and not just latency.</p>
+  <p>The important property: <strong>the on-disk format is byte-identical to the wire format</strong>. The broker never parses a record, never re-frames one, never keeps per-record bookkeeping. It receives bytes, appends bytes, and later sends the same bytes. Hold on to that — it is what makes the next section possible.</p>
+
+  <h2>Why it is fast — four mechanisms</h2>
+
+  <h3>1 · Sequential I/O</h3>
+  <p>Appending to a file is sequential, and sequential throughput beats random access by roughly an order of magnitude on spinning disks and still substantially on NVMe. The index files preserve this on the read path too: an offset becomes a byte position by lookup, so reads are a seek followed by a sequential scan rather than a walk.</p>
+
+  <h3>2 · Page cache instead of an application cache</h3>
+  <p>Writes land in the OS page cache. Kafka does <strong>not</strong> fsync per record — <code>log.flush.interval.messages</code> defaults to effectively never, and durability comes from <em>replication to other brokers</em>, not from reaching the platter. Three consequences worth stating:</p>
+  <ul>
+    <li>A broker <em>process</em> crash loses nothing, because the page cache belongs to the kernel and survives the process. A <em>machine</em> power loss can lose unflushed data on that broker — which is precisely why <code>acks=all</code> with <code>min.insync.replicas</code> is the durability story, and M3 is about getting that right.</li>
+    <li>The JVM heap stays small, since the data lives in the kernel's cache rather than a buffer pool. GC pauses stay out of the request path. A broker serving terabytes runs comfortably on a heap of a few gigabytes.</li>
+    <li>The cache is shared and warm across restarts of the broker process, and a consumer reading recent data usually never touches a disk at all.</li>
+  </ul>
+
+  <h3>3 · Zero-copy on the read path</h3>
+  <p>Because the bytes a consumer wants are already in the page cache in the exact format it expects, Kafka serves them with <code>sendfile</code>: the kernel moves them from page cache directly to the socket, with no copy into user space and no deserialisation. The broker never materialises a record on a fetch.</p>
+  <div class="callout">
+    <span class="tag">The senior follow-up</span>
+    <p><strong>When does Kafka <em>not</em> get zero-copy?</strong> When the connection is encrypted. TLS has to encrypt the bytes, which means pulling them into user space — so <code>sendfile</code> is off and throughput drops measurably. That is a real capacity-planning input, not trivia, and it is the question an interviewer asks after you say "zero-copy".</p>
+    <p>Historically there was a second case: serving an old client that needed an older message format forced the broker to down-convert, losing zero-copy and spiking broker CPU. Kafka 4.0 removed message formats v0 and v1 (KIP-724) along with <code>message.format.version</code>, so on a 4.x broker that case is gone — worth saying, because it shows you know what changed and when.</p>
+  </div>
+
+  <h3>4 · Batching, which is what ties the other three together</h3>
+  <p>The broker does no per-record work because it never needs to look inside a batch. No parsing, no re-framing, no per-message state. That is not an optimisation layered on top — it is the reason zero-copy is possible at all, since any transformation would force the broker to touch the bytes.</p>
+  <p>The through-line for the whole section: <strong>Kafka is fast because the broker was given almost nothing to do</strong>, and every mechanism above follows from refusing to keep per-message state. That refusal is the same one that costs you per-message retry and priority back in M0.</p>
+
+  <h2>Retention — what actually deletes data</h2>
+  <p>Deletion is driven by policy, never by consumption. Two limits, both enforced <strong>per partition</strong>:</p>
+  <ul>
+    <li><code>retention.ms</code> — delete segments older than this (default 7 days)</li>
+    <li><code>retention.bytes</code> — keep at most this many bytes <em>per partition</em>, deleting oldest first (default unlimited). A 100 GB budget on a 50-partition topic is 5 TB, not 100 GB. People get this wrong.</li>
+  </ul>
+
+  <div class="callout warn">
+    <span class="tag">The bug everyone hits once</span>
+    <p>Deletion happens at <strong>segment granularity</strong>, and the active segment is never deleted. So "I set <code>retention.ms=60000</code> and nothing is being deleted" is almost always correct behaviour: on a low-traffic topic the active segment has not rolled, because rolling needs 1 GiB of data or 7 days of time. Every record is eligible and none can go, because they share a file with records that are not.</p>
+    <p>The fix is to make <code>segment.ms</code> (or <code>segment.bytes</code>) small enough that segments close and become whole-segment eligible. Retention is a floor on how long data lives, never a ceiling — the real guarantee is "at least <code>retention.ms</code>, plus up to one segment's worth of time".</p>
+  </div>
+
+  <p>The retention thread also only runs every <code>log.retention.check.interval.ms</code> (default 5 minutes), which adds another lag between eligible and gone.</p>
+
+  <h2>Log compaction — retention by key</h2>
+  <p><code>cleanup.policy=compact</code> changes the question from "how old is this record" to "is this the newest value for its key". The cleaner rewrites segments keeping only the latest record per key. A record with a <strong>null value</strong> is a <strong>tombstone</strong>: it marks the key as deleted, survives for <code>delete.retention.ms</code> (default 24 h) so that consumers have a chance to see the deletion, then disappears with the key.</p>
+  <p>What compaction gives you is a log that converges to a <em>table</em>: replay it from the start and you end up with current state per key. That is the mechanism behind <code>__consumer_offsets</code>, Kafka Streams changelog topics, and CDC snapshots.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Property</th><th>Why it matters</th></tr></thead>
+    <tbody>
+      <tr><td>Offsets are never renumbered</td><td>Surviving records keep their original offsets, so a compacted log has <strong>gaps</strong>. Consumer code that assumes offset+1 is wrong.</td></tr>
+      <tr><td>The active segment is never compacted</td><td>The newest data is always uncompacted, so a consumer at the head still sees every version. Compaction is eventual, not a guarantee about what you read.</td></tr>
+      <tr><td><code>min.cleanable.dirty.ratio</code> (default 0.5)</td><td>Cleaning only starts once half the log is "dirty". Lower it and you compact sooner but burn more I/O.</td></tr>
+      <tr><td><code>min.compaction.lag.ms</code> / <code>max.compaction.lag.ms</code></td><td>Floor and ceiling on how long a record stays before it can be compacted away — the floor gives consumers a window to see intermediate values.</td></tr>
+      <tr><td><code>cleanup.policy=compact,delete</code></td><td>Both: keep latest per key <em>and</em> drop anything older than retention. Useful when a keyspace grows without bound.</td></tr>
+      <tr><td>A null key is invalid on a compacted topic</td><td>There is nothing to compact on. The broker rejects it.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Tiered storage (KIP-405)</h2>
+  <p>With <code>remote.storage.enable=true</code>, a topic keeps recent segments locally (<code>local.retention.ms</code> / <code>local.retention.bytes</code>) and moves older closed segments to object storage, while <code>retention.ms</code> continues to govern total lifetime. Consumers read through transparently; the offset space is unchanged.</p>
+  <p>Two things it buys that matter in an interview:</p>
+  <ul>
+    <li><strong>Cost.</strong> Long retention stops requiring broker disks sized for it. Keeping a year of history becomes an object-storage bill rather than a cluster-sizing problem.</li>
+    <li><strong>Recovery time.</strong> Replacing a broker previously meant replicating every byte it held. With most history remote, a new broker only pulls the local window, so rebuild drops from hours to minutes. This is the one people forget, and it is the stronger argument.</li>
+  </ul>
+  <p>The cost is a read-latency cliff for consumers that fall behind into remote segments, plus the operational surface of a second storage system. And it does not apply to compacted topics.</p>
+
+  <h2>Configuration worth knowing by heart</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Setting</th><th>Default</th><th>What it controls</th></tr></thead>
+    <tbody>
+      <tr><td><code>segment.bytes</code></td><td>1 GiB</td><td>Roll the active segment at this size</td></tr>
+      <tr><td><code>segment.ms</code></td><td>7 days</td><td>Roll it at this age — the retention trap lives here</td></tr>
+      <tr><td><code>retention.ms</code></td><td>7 days</td><td>Delete closed segments older than this</td></tr>
+      <tr><td><code>retention.bytes</code></td><td>unlimited</td><td>Size cap <strong>per partition</strong></td></tr>
+      <tr><td><code>cleanup.policy</code></td><td><code>delete</code></td><td><code>delete</code>, <code>compact</code>, or both</td></tr>
+      <tr><td><code>min.cleanable.dirty.ratio</code></td><td>0.5</td><td>How dirty before the cleaner runs</td></tr>
+      <tr><td><code>delete.retention.ms</code></td><td>24 h</td><td>How long tombstones survive</td></tr>
+      <tr><td><code>log.index.interval.bytes</code></td><td>4 KiB</td><td>Index density</td></tr>
+      <tr><td><code>log.retention.check.interval.ms</code></td><td>5 min</td><td>How often retention is evaluated</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2 id="lab02">Lab 02</h2>
+  <p><strong><a href="lab-02-storage.html">Open the step-by-step worksheet →</a></strong> — six steps: roll segments and read their names, dump the sparse index, reproduce the retention trap and then fix it, compact a topic and watch the offset gaps appear, and measure a cold versus warm read.</p>
+  <p>The step that matters most is the retention trap. It is the single most common Kafka support question, and having produced it deliberately once is worth more than reading about it three times.</p>
+
+  <!--QUIZ:02-storage-->

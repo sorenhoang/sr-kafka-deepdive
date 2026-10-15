@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>
+:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}
+img{max-width:100%}
+[hidden]:not([hidden="until-found"]){display:none!important}
+</style>
+<title>Kafka Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@500;700;900&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: sticky module rail on the left, single reading column ~68ch on the right; stacks to one column under 900px */
+:root{
+  --paper:#F2F3EF; --panel:#FBFBF9; --sunk:#E8EAE4;
+  --ink:#1A1D21; --ink-2:#3C434B; --muted:#6B737C;
+  --rule:#D5D8D1; --rule-strong:#B9BEB6;
+  --accent:#1D6B61; --accent-soft:#DCE9E6;
+  --warn:#9E4B18; --warn-soft:#F2E3D8;
+  --font-display:"Chivo","Helvetica Neue",Arial,sans-serif;
+  --font-body:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#15171A; --panel:#1C1F23; --sunk:#23272C;
+  --ink:#E9EBE6; --ink-2:#C3C9CE; --muted:#929AA2;
+  --rule:#2C3137; --rule-strong:#3D444B;
+  --accent:#58B6A7; --accent-soft:#1B312E;
+  --warn:#D98B52; --warn-soft:#33241A;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --paper:#15171A; --panel:#1C1F23; --sunk:#23272C;
+  --ink:#E9EBE6; --ink-2:#C3C9CE; --muted:#929AA2;
+  --rule:#2C3137; --rule-strong:#3D444B;
+  --accent:#58B6A7; --accent-soft:#1B312E;
+  --warn:#D98B52; --warn-soft:#33241A;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:17px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+.shell{display:grid; grid-template-columns:260px minmax(0,1fr); gap:0; max-width:1180px; margin:0 auto}
+
+.rail{
+  border-right:1px solid var(--rule);
+  padding:28px 20px 48px; align-self:start;
+  position:sticky; top:env(safe-area-inset-top,0px);
+  max-height:100vh; overflow-y:auto;
+}
+.brand{font-family:var(--font-display); font-weight:900; font-size:19px; letter-spacing:-.02em; line-height:1.15; margin:0 0 2px}
+.brand span{color:var(--accent)}
+.brand-sub{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:0 0 22px}
+.rail h3{font-family:var(--font-mono); font-size:10px; letter-spacing:.11em; text-transform:uppercase; color:var(--muted); margin:22px 0 8px; font-weight:600}
+.rail nav{display:flex; flex-direction:column; gap:1px}
+.rail nav a{
+  display:flex; gap:9px; align-items:baseline;
+  font-family:var(--font-display); font-size:13.5px; font-weight:500;
+  color:var(--ink-2); text-decoration:none; padding:5px 8px; border-radius:3px; min-width:0;
+}
+.rail nav a:hover{background:var(--sunk); color:var(--ink)}
+.rail nav a .n{font-family:var(--font-mono); font-size:10.5px; color:var(--muted); flex:0 0 22px; font-weight:500}
+.rail nav a.done .n{color:var(--accent)}
+.rail nav a.todo{color:var(--muted)}
+.rail nav a.todo .n{opacity:.6}
+.rail nav a.wip .n{color:var(--warn)}
+.legend i{color:var(--warn); font-style:normal}
+.legend{font-family:var(--font-mono); font-size:10px; color:var(--muted); margin-top:20px; line-height:1.9; border-top:1px solid var(--rule); padding-top:14px}
+.legend b{color:var(--accent); font-weight:500}
+.repo-link{font-family:var(--font-mono); font-size:10px; margin-top:12px}
+
+main{padding:40px 44px 96px; min-width:0}
+main.solo{max-width:900px; margin:0 auto; padding:40px 24px 96px}
+.eyebrow{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.11em; text-transform:uppercase; color:var(--accent); font-weight:600; margin:0 0 10px}
+h1{font-family:var(--font-display); font-weight:900; font-size:clamp(30px,4.6vw,44px); line-height:1.06; letter-spacing:-.025em; margin:0 0 14px; text-wrap:balance}
+.lede{font-size:19px; color:var(--ink-2); max-width:62ch; margin:0 0 8px}
+h2{font-family:var(--font-display); font-weight:700; font-size:25px; letter-spacing:-.015em; margin:56px 0 4px; padding-top:22px; border-top:2px solid var(--ink); text-wrap:balance}
+h3{font-family:var(--font-display); font-weight:700; font-size:18px; letter-spacing:-.01em; margin:34px 0 6px; text-wrap:balance}
+p{margin:10px 0; max-width:68ch}
+a{color:var(--accent)}
+code{font-family:var(--font-mono); font-size:.86em; background:var(--sunk); padding:1.5px 5px; border-radius:3px}
+strong{font-weight:600}
+ul,ol{max-width:68ch; padding-left:22px; margin:10px 0}
+li{margin:5px 0}
+hr{border:0; border-top:1px solid var(--rule); margin:40px 0}
+
+.scroll{overflow-x:auto; margin:18px 0; border:1px solid var(--rule); border-radius:5px; background:var(--panel)}
+table{border-collapse:collapse; width:100%; font-size:14.5px; font-family:var(--font-display)}
+th,td{text-align:left; padding:9px 13px; border-bottom:1px solid var(--rule); vertical-align:top}
+thead th{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); font-weight:600; background:var(--sunk); white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+td code{background:transparent; padding:0; color:var(--accent)}
+.num{font-variant-numeric:tabular-nums; font-family:var(--font-mono)}
+
+pre{
+  font-family:var(--font-mono); font-size:13px; line-height:1.62;
+  background:var(--panel); border:1px solid var(--rule); border-left:2px solid var(--accent);
+  border-radius:4px; padding:14px 16px; overflow-x:auto; margin:16px 0; color:var(--ink-2);
+}
+pre b{color:var(--ink); font-weight:600}
+pre .c{color:var(--muted)}
+
+.callout{border:1px solid var(--rule); border-left:3px solid var(--accent); background:var(--panel); border-radius:4px; padding:14px 18px; margin:20px 0}
+.callout.warn{border-left-color:var(--warn); background:var(--warn-soft)}
+.callout .tag{font-family:var(--font-mono); font-size:10px; letter-spacing:.09em; text-transform:uppercase; font-weight:600; color:var(--accent); display:block; margin-bottom:5px}
+.callout.warn .tag{color:var(--warn)}
+.callout p{margin:5px 0; max-width:62ch}
+.callout :first-child{margin-top:0} .callout :last-child{margin-bottom:0}
+
+.logstrip{display:flex; flex-direction:column; gap:7px; margin:20px 0; font-family:var(--font-mono); font-size:11.5px}
+.logrow{display:flex; align-items:center; gap:9px; min-width:0}
+.logrow .plabel{flex:0 0 72px; color:var(--muted); letter-spacing:.04em}
+.cells{display:flex; gap:3px; flex-wrap:wrap; min-width:0}
+.cell{width:30px; height:26px; display:grid; place-items:center; background:var(--sunk); border:1px solid var(--rule); border-radius:2px; color:var(--ink-2); font-size:10.5px; font-variant-numeric:tabular-nums}
+.cell.hw{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600}
+.cell.empty{background:transparent; border-style:dashed; color:transparent}
+.logrow .owner{flex:0 0 auto; color:var(--accent); font-size:10.5px; letter-spacing:.04em}
+.logrow .owner.idle{color:var(--warn)}
+
+.tool{border:1px solid var(--rule-strong); border-radius:6px; background:var(--panel); padding:20px; margin:24px 0}
+.tool-head{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); font-weight:600; margin-bottom:14px}
+.fields{display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end}
+.field{display:flex; flex-direction:column; gap:5px; min-width:0}
+.field label{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted)}
+.field input{
+  font-family:var(--font-mono); font-size:14px; padding:7px 10px; width:150px; max-width:100%;
+  background:var(--paper); color:var(--ink); border:1px solid var(--rule-strong); border-radius:3px;
+}
+.field input:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+.field input[type=number]{width:90px}
+.result{margin-top:18px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; font-family:var(--font-mono); font-size:13px}
+.chip{border:1px solid var(--rule-strong); border-radius:3px; padding:6px 11px; background:var(--paper); font-variant-numeric:tabular-nums}
+.chip b{color:var(--accent); font-weight:600}
+.verdict{font-family:var(--font-display); font-size:14px; font-weight:500; margin-top:12px}
+.verdict.moved{color:var(--warn)}
+.verdict.kept{color:var(--accent)}
+
+.qlist{list-style:none; padding:0; margin:18px 0; max-width:none}
+.qlist li{border:1px solid var(--rule); border-radius:5px; background:var(--panel); margin:7px 0; padding:0}
+.qlist label{display:flex; gap:12px; align-items:flex-start; padding:12px 15px; cursor:pointer}
+.qlist input{margin:4px 0 0; accent-color:var(--accent); flex:0 0 auto; width:15px; height:15px}
+.qlist .qtext{font-size:15.5px; min-width:0}
+.qlist .lvl{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); display:block; margin-bottom:3px}
+.qlist .lvl.hard{color:var(--warn)}
+.qlist input:checked + .qtext{color:var(--muted); text-decoration:line-through var(--rule-strong)}
+.qmeta{font-family:var(--font-mono); font-size:11px; color:var(--muted); margin-top:10px}
+
+/* lab worksheet */
+.step{border:1px solid var(--rule); border-radius:6px; background:var(--panel); padding:0 22px 18px; margin:26px 0}
+.step > h3{display:flex; gap:12px; align-items:baseline; margin:0 -22px 4px; padding:14px 22px; border-bottom:1px solid var(--rule); background:var(--sunk); border-radius:5px 5px 0 0}
+.step > h3 .sn{font-family:var(--font-mono); font-size:11px; color:var(--accent); flex:0 0 auto; letter-spacing:.06em}
+.step h4{font-family:var(--font-mono); font-weight:600; font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:20px 0 4px}
+.step h4.predict{color:var(--warn)}
+.step > :last-child{margin-bottom:0}
+.predict-box{border-left:3px solid var(--warn); background:var(--warn-soft); border-radius:3px; padding:11px 15px; margin:8px 0}
+.predict-box p{margin:4px 0; max-width:62ch}
+.predict-box :first-child{margin-top:0} .predict-box :last-child{margin-bottom:0}
+.labtrack{list-style:none; padding:0; margin:0}
+.labtrack li{border:0; background:transparent; margin:0}
+.labtrack label{display:flex; gap:10px; align-items:center; padding:0; cursor:pointer; font-family:var(--font-mono); font-size:11px; color:var(--muted)}
+.labtrack input{accent-color:var(--accent); width:14px; height:14px; margin:0}
+.labtrack input:checked + span{color:var(--accent)}
+.backlink{font-family:var(--font-mono); font-size:11px; margin:0 0 18px}
+
+@media (max-width:900px){
+  .shell{grid-template-columns:minmax(0,1fr)}
+  .rail{position:static; max-height:none; border-right:0; border-bottom:1px solid var(--rule); padding:26px 20px 22px}
+  .rail nav{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:1px}
+  main{padding:30px 20px 80px}
+  body{font-size:16px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+</style>
+</head>
+<body>
+<main class="solo">
+  <p class="backlink"><a href="index.html">← Kafka Deep Dive</a></p>
+  <p class="eyebrow">Module 2 · lab worksheet</p>
+  <h1>Lab 02 — What a partition looks like on disk</h1>
+  <p class="lede">Six steps. Module 1 said a partition is a log on disk; here you open that log, split it into segments, read its index, fail to delete from it, fix that, and compact it by key. Predict before every command — being wrong about step 3 in particular is the point of step 3.</p>
+  <p class="qmeta">Expect 45-60 minutes. One broker — storage is a per-partition, per-broker concern.</p>
+
+  <ul class="labtrack qlist" data-store="lab02-steps" style="margin:22px 0">
+    <li><label><input type="checkbox" data-q="1"><span>1 · Roll segments, read their names</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span>2 · Dump the sparse index</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span>3 · The retention trap</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span>4 · Fix it, watch data go</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span>5 · Compaction and offset gaps</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span>6 · Cold vs warm read</span></label></li>
+  </ul>
+
+  <h2>Setup</h2>
+<pre>cd labs/lab02-storage
+docker compose up -d &amp;&amp; docker compose ps     <span class="c"># healthy in ~30s</span>
+
+python3 -m venv .venv
+source .venv/bin/activate                     <span class="c"># once per terminal</span>
+pip install -r requirements.txt
+cd scripts</pre>
+  <p>Two broker settings are turned down so you are not waiting around: <code>log.retention.check.interval.ms</code> to 10s (default 5 minutes) and <code>log.cleaner.backoff.ms</code> to 5s. Production leaves both alone — and knowing they exist is half of why retention looks slow in real clusters.</p>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 1</span>Roll some segments and read their names</h3>
+    <p><strong>Proves:</strong> a partition is a directory of segments, and the filename is the index into them.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>The topic will be created with <code>segment.bytes=1024</code>, then given 200 records of about 100 bytes each. Roughly how many <code>.log</code> files do you expect? And what do you think decides each file's <em>name</em>?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+  --create --topic lab02.segments --partitions 1 --replication-factor 1 \
+  --config segment.bytes=1024
+
+python3 01_fill_segments.py 200 100
+
+docker exec lab02-kafka ls -la /tmp/kraft-combined-logs/lab02.segments-0/</pre>
+
+    <h4>Expected</h4>
+<pre>00000000000000000000.index
+00000000000000000000.log
+00000000000000000000.timeindex
+00000000000000000009.index
+00000000000000000009.log
+00000000000000000009.timeindex
+...
+00000000000000000193.log        <span class="c"># the active segment</span>
+leader-epoch-checkpoint
+partition.metadata</pre>
+    <p>The exact offsets depend on how batching fell out on your run — the producer writes batches, and a segment rolls when the batch that would exceed <code>segment.bytes</code> arrives. The shape is what matters: many triples, each named after the offset it starts at.</p>
+
+    <h4>Why</h4>
+    <p>The name is the segment's <strong>base offset</strong>, zero-padded to 20 digits so that lexical order equals numeric order. To find offset 400, the broker binary-searches this list of names and picks the segment whose base offset is the largest one not greater than 400 — without opening a single file. Zero-padding is what makes a plain string sort do that correctly.</p>
+    <p>Only the last segment is open for writing. It is the <strong>active segment</strong>, and it is the one that steps 3 and 5 keep running into.</p>
+
+    <h4>Check yourself</h4>
+    <p>Production defaults are <code>segment.bytes=1 GiB</code> and <code>segment.ms=7 days</code>. On a topic receiving 10 records a minute at 200 bytes each, which limit rolls the segment, and how long does that take?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 2</span>Dump the log and its index</h3>
+    <p><strong>Proves:</strong> the index is sparse, and records are stored as batches rather than individually.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>A segment holds about 10 records here. How many entries do you expect in its <code>.index</code> — ten, or fewer? And in the <code>.log</code> dump, will you see 10 separate records or something else?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-dump-log.sh \
+  --files /tmp/kraft-combined-logs/lab02.segments-0/00000000000000000000.log \
+  --print-data-log | head -20
+
+docker exec lab02-kafka /opt/kafka/bin/kafka-dump-log.sh \
+  --files /tmp/kraft-combined-logs/lab02.segments-0/00000000000000000000.index</pre>
+
+    <h4>Expected</h4>
+    <p>The log dump shows <code>baseOffset</code>, <code>lastOffset</code>, <code>count</code>, <code>producerId</code>, <code>isTransactional</code>, <code>compresscodec</code> — these are <strong>batch</strong> headers, with the records nested inside. The index dump shows very few entries, often zero or one for a segment this small.</p>
+
+    <h4>Why</h4>
+    <p>An index entry is written roughly every <code>log.index.interval.bytes</code> (4 KiB) of log, not per record — and a 1 KiB segment never reaches 4 KiB, so it may have no entries at all beyond the implicit base. Resolving an offset therefore ends in a short forward scan through the <code>.log</code>, by design.</p>
+    <p>Why not index every record? These files are memory-mapped, so a dense index competes for exactly the page-cache memory that makes reads fast. Trading a few microseconds of scan for cache headroom is the right call, and it is a good answer to give when asked why the lookup is not O(1).</p>
+    <p>The batch headers are the other half of the lesson: <code>producerId</code> is the idempotent producer (M5) and <code>isTransactional</code> is exactly-once (M7). The broker stores what the producer framed, untouched.</p>
+
+    <h4>Check yourself</h4>
+    <p>Dump the <code>.timeindex</code> as well. Given what it maps, which CLI operation would be impossible without it?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 3</span>The retention trap</h3>
+    <p><strong>Proves:</strong> retention deletes whole segments and never the active one. This is the most common Kafka support question there is.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>You are about to create a topic with <code>retention.ms=30000</code> — thirty seconds — write a handful of records, and wait two minutes. How many records will still be readable? Write the number down before running it.</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+  --create --topic lab02.trap --partitions 1 --replication-factor 1 \
+  --config retention.ms=30000
+
+python3 01_fill_segments.py 20 100
+<span class="c"># ^ edit TOPIC in the script, or just produce with the console producer:</span>
+<span class="c">#   docker exec -i lab02-kafka /opt/kafka/bin/kafka-console-producer.sh \</span>
+<span class="c">#     --bootstrap-server localhost:19092 --topic lab02.trap</span>
+
+<span class="c"># wait two minutes, then ask where the log starts and ends</span>
+docker exec lab02-kafka /opt/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+  --bootstrap-server localhost:19092 --topic lab02.trap --time -2    <span class="c"># earliest</span>
+docker exec lab02-kafka /opt/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+  --bootstrap-server localhost:19092 --topic lab02.trap --time -1    <span class="c"># latest</span>
+
+docker exec lab02-kafka ls -la /tmp/kraft-combined-logs/lab02.trap-0/</pre>
+
+    <h4>Expected</h4>
+    <p>Earliest offset is still 0. Nothing has been deleted, minutes after every record became eligible. One <code>.log</code> file, still the active one.</p>
+
+    <h4>Why</h4>
+    <p>Retention operates on <strong>closed segments</strong>. The active segment is never deleted, and on this topic it has not rolled because rolling needs <code>segment.bytes</code> (1 GiB) or <code>segment.ms</code> (7 days) — neither of which twenty small records will reach. Every record is eligible for deletion and none of them can go, because they share a file with records that are not.</p>
+    <p>The correct mental model: <strong>retention is a floor on how long data lives, never a ceiling.</strong> The real guarantee is "at least <code>retention.ms</code>, plus up to one segment's worth of time, plus up to one <code>log.retention.check.interval.ms</code>". Teams that promise regulators a deletion deadline on the basis of <code>retention.ms</code> alone are promising something Kafka does not do.</p>
+
+    <h4>Check yourself</h4>
+    <p>A compliance requirement says personal data must be gone within 24 hours. What do you set, and what do you tell the compliance team the actual upper bound is?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 4</span>Fix it and watch the data go</h3>
+    <p><strong>Proves:</strong> segment rolling is the missing half of retention.</p>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:19092 \
+  --alter --entity-type topics --entity-name lab02.trap \
+  --add-config segment.ms=20000
+
+<span class="c"># produce a few more records so a roll actually happens, then wait ~60s</span>
+docker exec lab02-kafka /opt/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+  --bootstrap-server localhost:19092 --topic lab02.trap --time -2</pre>
+
+    <h4>Expected</h4>
+    <p>Earliest offset moves forward from 0 — the old segment closed, aged past 30 seconds, and was deleted. The log now starts partway in.</p>
+
+    <h4>Why</h4>
+    <p>Nothing about <code>retention.ms</code> changed. All that changed is that segments now close, which is what makes them eligible. This is worth internalising as a pair: <strong>every retention setting needs a segment setting that lets it act.</strong></p>
+    <p>Notice too that the earliest offset moved rather than the records being renumbered. Offsets are immutable; deleting from the front moves the log's start, which is why a consumer with a committed offset below the new earliest gets an <code>OFFSET_OUT_OF_RANGE</code> and falls back to <code>auto.offset.reset</code> — silently skipping data if that is set to <code>latest</code>.</p>
+
+    <h4>Check yourself</h4>
+    <p>A consumer group was down for a week on a topic with 3-day retention. It restarts with <code>auto.offset.reset=latest</code>. What happens, and what would <code>earliest</code> have done instead? Which is the safer default and why is it not the obvious one?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 5</span>Compaction, tombstones and offset gaps</h3>
+    <p><strong>Proves:</strong> compaction keeps the newest value per key, leaves holes in the offset sequence, and never touches the active segment.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Four keys, three versions each, plus a tombstone for <code>user-2</code> — thirteen records at offsets 0 to 12. After compaction, how many records survive, and <em>what offsets do they have</em>? That second half is the interesting one.</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab02-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+  --create --topic lab02.compacted --partitions 1 --replication-factor 1 \
+  --config cleanup.policy=compact \
+  --config segment.bytes=1024 \
+  --config min.cleanable.dirty.ratio=0.01 \
+  --config min.compaction.lag.ms=0 \
+  --config delete.retention.ms=10000
+
+python3 02_compaction_demo.py
+
+<span class="c"># the cleaner only works on closed segments — force a roll</span>
+docker exec lab02-kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:19092 \
+  --alter --entity-type topics --entity-name lab02.compacted \
+  --add-config segment.ms=5000
+
+<span class="c"># produce one more record to trigger the roll, wait ~30s, then look</span>
+docker exec lab02-kafka ls /tmp/kraft-combined-logs/lab02.compacted-0/
+docker exec lab02-kafka /opt/kafka/bin/kafka-dump-log.sh \
+  --files /tmp/kraft-combined-logs/lab02.compacted-0/00000000000000000000.log \
+  --print-data-log | grep -E 'offset:|payload'</pre>
+
+    <h4>Expected</h4>
+    <p>Only the newest value per key survives, and <code>user-2</code> is gone once its tombstone passes <code>delete.retention.ms</code>. The surviving records keep their <strong>original offsets</strong>, so the sequence reads something like 8, 10, 11 — with gaps where the superseded records used to be.</p>
+
+    <h4>Why</h4>
+    <p>Compaction rewrites segments and drops superseded records, but it never renumbers. An offset identifies a position in the log forever, and consumers have committed against those numbers. The consequence for consumer code: <strong>anything assuming offset+1, or counting records to infer progress, is wrong on a compacted topic.</strong></p>
+    <p>A tombstone is a record with a null value. It marks the key deleted and survives for <code>delete.retention.ms</code> (default 24 h) so consumers have a window to observe the deletion — then it disappears with the key. A consumer offline longer than that window never learns the key was deleted and keeps a stale value indefinitely. That is a real correctness bug in cache-invalidation and CDC pipelines, and the usual answer is a periodic full rebuild rather than trusting incremental state.</p>
+    <p>Finally: the active segment is never compacted, so the head of the log always holds uncompacted duplicates. Compaction is eventual. A consumer at the head sees every version; one starting from the tail sees only the latest.</p>
+
+    <h4>Check yourself</h4>
+    <p><code>__consumer_offsets</code> is a compacted topic. Given what compaction converges to, explain in one sentence why that is the right choice for it — and why a topic of order events would be the wrong choice.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 6</span>Cold versus warm read</h3>
+    <p><strong>Proves:</strong> reads are served from the page cache, not from disk — and the honest version of what that means on a laptop.</p>
+
+    <h4>Run</h4>
+<pre>python3 03_read_timing.py lab02.segments</pre>
+
+    <h4>Expected</h4>
+    <p>Two passes with similar timings. That is not a failed experiment — it is the result. The data was written moments ago and never left the page cache, so neither pass touched a disk.</p>
+
+    <h4>Why</h4>
+    <p>Kafka does not maintain its own cache. Writes land in the OS page cache and are not fsynced per record (<code>log.flush.interval.messages</code> defaults to effectively never); durability comes from replication to other brokers rather than from reaching the platter. Reads of recent data come back out of that same cache and are sent with <code>sendfile</code> — kernel straight to socket, no copy into user space, no deserialisation.</p>
+    <p>Two consequences worth being able to state: a broker <em>process</em> crash loses nothing because the cache belongs to the kernel, while a <em>machine</em> power loss can lose unflushed data on that broker — which is exactly why durability is <code>acks=all</code> plus <code>min.insync.replicas</code>, and why M3 exists. And the JVM heap stays small, so a broker serving terabytes runs on a few gigabytes of heap with GC off the request path.</p>
+    <p>To see a genuinely cold read you would need to evict the cache (<code>echo 3 &gt; /proc/sys/vm/drop_caches</code> on a Linux host) or read data old enough to have been evicted naturally. Not worth doing inside Docker on a laptop; knowing <em>why</em> the two numbers match is the takeaway.</p>
+
+    <h4>Check yourself</h4>
+    <p>Your cluster enables TLS. What happens to the <code>sendfile</code> path, and what should you expect to see in broker CPU and throughput? (This is the standard follow-up after a candidate says "zero-copy".)</p>
+  </div>
+
+  <h2>Tear down</h2>
+<pre>docker compose down -v</pre>
+
+  <h2>When something goes wrong</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+    <tbody>
+      <tr><td>Only one <code>.log</code> file after step 1</td><td>The records were smaller than expected or batched into one write. Run <code>python3 01_fill_segments.py 500 200</code> for more volume.</td></tr>
+      <tr><td><code>.index</code> dump is empty</td><td>Correct — a segment under 4 KiB produces no index entries. That is step 2's point; use a larger segment to see entries.</td></tr>
+      <tr><td>Compaction never happens</td><td>The cleaner only touches closed segments. Force a roll with <code>segment.ms</code> and produce one more record, then wait for <code>log.cleaner.backoff.ms</code>.</td></tr>
+      <tr><td>Tombstone still visible</td><td>It survives <code>delete.retention.ms</code> by design — 10s here, 24h by default.</td></tr>
+      <tr><td>Retention still not deleting after step 4</td><td>No roll happened yet. Produce a record after setting <code>segment.ms</code>; a roll is triggered on write, not by a timer alone.</td></tr>
+      <tr><td><code>ModuleNotFoundError</code></td><td>The venv is not active in this terminal. <code>source .venv/bin/activate</code>, confirm with <code>which python3</code>.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Done when</h2>
+  <p>You can answer these without looking anything up: what the segment filename is and why it is zero-padded; why the index is sparse; why a 30-second retention deleted nothing; what offsets look like after compaction and what that breaks in consumer code; and when Kafka loses zero-copy. The last one is the question interviewers reach for immediately after you say the words.</p>
+</main>
+
+<script>
+(function(){
+  "use strict";
+
+  // murmur2, matching org.apache.kafka.common.utils.Utils.murmur2
+  function murmur2(bytes){
+    var seed = 0x9747b28c, m = 0x5bd1e995, r = 24;
+    var len = bytes.length, len4 = len & ~3;
+    var h = (seed ^ len) >>> 0;
+    for (var i = 0; i < len4; i += 4){
+      var k = (bytes[i] & 0xff) | ((bytes[i+1] & 0xff) << 8) | ((bytes[i+2] & 0xff) << 16) | (bytes[i+3] << 24);
+      k = Math.imul(k, m) >>> 0;
+      k = (k ^ (k >>> r)) >>> 0;
+      k = Math.imul(k, m) >>> 0;
+      h = Math.imul(h, m) >>> 0;
+      h = (h ^ k) >>> 0;
+    }
+    var rem = len & 3;
+    if (rem === 3) h = (h ^ ((bytes[len4+2] & 0xff) << 16)) >>> 0;
+    if (rem >= 2)  h = (h ^ ((bytes[len4+1] & 0xff) << 8)) >>> 0;
+    if (rem >= 1){ h = (h ^ (bytes[len4] & 0xff)) >>> 0; h = Math.imul(h, m) >>> 0; }
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = Math.imul(h, m) >>> 0;
+    h = (h ^ (h >>> 15)) >>> 0;
+    return h;
+  }
+  function partitionOf(key, n){
+    if (!key.length || !(n > 0)) return null;
+    return ((murmur2(new TextEncoder().encode(key)) & 0x7fffffff) % n);
+  }
+
+  var elKey = document.getElementById('k-key');
+  if (elKey){
+    var elB = document.getElementById('k-before');
+    var elA = document.getElementById('k-after');
+    var outH = document.getElementById('k-hash');
+    var outP1 = document.getElementById('k-p1');
+    var outP2 = document.getElementById('k-p2');
+    var outV = document.getElementById('k-verdict');
+
+    var recompute = function(){
+      var key = elKey.value;
+      var nb = parseInt(elB.value, 10), na = parseInt(elA.value, 10);
+      if (!key.length){
+        outH.textContent = outP1.textContent = outP2.textContent = '—';
+        outV.className = 'verdict';
+        outV.textContent = 'Empty key means a null key: the sticky partitioner decides, nothing is hashed.';
+        return;
+      }
+      outH.textContent = murmur2(new TextEncoder().encode(key)).toString(10);
+      var p1 = partitionOf(key, nb), p2 = partitionOf(key, na);
+      outP1.textContent = p1 === null ? '—' : p1;
+      outP2.textContent = p2 === null ? '—' : p2;
+      if (p1 === null || p2 === null){
+        outV.className = 'verdict';
+        outV.textContent = 'Partition count must be at least 1.';
+      } else if (p1 === p2){
+        outV.className = 'verdict kept';
+        outV.textContent = 'Key stays on the same partition — ordering for this key is unaffected.';
+      } else {
+        outV.className = 'verdict moved';
+        outV.textContent = 'Key moves from partition ' + p1 + ' to ' + p2 + '. Older events stay on ' + p1 + ' while new ones go to ' + p2 + ', so ordering breaks.';
+      }
+    };
+    [elKey, elB, elA].forEach(function(el){ el.addEventListener('input', recompute); });
+    recompute();
+  }
+
+  // Checklist state, stored per viewer in their own browser; best-effort.
+  document.querySelectorAll('.qlist[data-store]').forEach(function(list){
+    var KEY = 'kafka-dd-' + list.dataset.store;
+    var boxes = Array.prototype.slice.call(list.querySelectorAll('input[type=checkbox]'));
+    var counter = document.querySelector('[data-count-for="' + list.dataset.store + '"]');
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { saved = {}; }
+    var render = function(){
+      if (!counter) return;
+      var done = boxes.filter(function(b){ return b.checked; }).length;
+      counter.textContent = done + ' / ' + boxes.length + (done === boxes.length ? ' — all done' : '');
+    };
+    boxes.forEach(function(b){
+      if (saved[b.dataset.q]) b.checked = true;
+      b.addEventListener('change', function(){
+        var state = {};
+        boxes.forEach(function(x){ if (x.checked) state[x.dataset.q] = 1; });
+        try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+        render();
+      });
+    });
+    render();
+  });
+})();
+</script>
+</body>
+</html>

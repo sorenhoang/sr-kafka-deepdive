@@ -35,7 +35,7 @@ questions answered and graded.
 |---|---|:--:|:--:|:--:|
 | M0 | Positioning: log vs queue, when not to use Kafka, Share Groups | ready | ✅ | ✅ |
 | M1 | Topic, partition, offset, replica, consumer group, ordering | ready | ✅ | ✅ |
-| M2 | Storage internals: segments, page cache, zero-copy, compaction | | | |
+| M2 | Storage internals: segments, page cache, zero-copy, compaction | ready | | |
 | M3 | Replication, ISR, LEO vs high watermark, unclean leader election | | | |
 | M4 | KRaft: quorum controller, metadata log | | | |
 | M5 | Producer internals, idempotent producer | | | |
@@ -67,6 +67,7 @@ QUIZ.md              generated — all questions, answers behind <details> toggl
 labs/lab00-log-vs-queue/
                      Kafka and RabbitMQ side by side: consuming does not delete
 labs/lab01/          three-broker KRaft cluster + Python scripts
+labs/lab02-storage/  single broker; segments, indexes, retention, compaction
 private/             gitignored — raw answers, grades and gap notes, local only
 ```
 

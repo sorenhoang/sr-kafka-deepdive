@@ -193,3 +193,102 @@ Ordering is guaranteed **within a partition only**, and only if the producer is 
 Appending to a log is sequential I/O, which on spinning disks and SSDs alike is an order of magnitude faster than random access — but that is only the first third of the answer. Writes go to the OS **page cache** rather than being fsynced per record, so the broker returns as soon as the data is in memory and durability comes from replication to other brokers instead of from flushing; a broker restart loses nothing because the page cache is the kernel's, not the process's. Reads of recent data are served from that same page cache, and Kafka sends them with **`sendfile`** so bytes go from page cache straight to the socket without being copied into user space or re-encoded — the broker never materialises the records at all. On top of that, records travel in **compressed batches** written to the log in the exact wire format the producer sent and the consumer expects, so the broker does no per-record work: no parsing, no re-framing, no per-message bookkeeping. The JVM heap stays small because the data lives in the kernel's cache, which also keeps GC pauses out of the path.
 
 </details>
+
+
+## M2 · Storage internals
+
+### Junior
+
+**M2.1** — What files make up one partition on disk, and what is each for?
+
+<details>
+<summary>Answer</summary>
+
+A directory named `<topic>-<partition>`, holding segments. Each segment is three files sharing a base-offset name: `.log` with the record batches, `.index` mapping offsets to byte positions, and `.timeindex` mapping timestamps to offsets. The filename is the offset the segment starts at, zero-padded, which is how the broker picks the right segment by binary-searching filenames before opening anything.
+
+</details>
+
+**M2.2** — What is the active segment, and what makes the broker roll to a new one?
+
+<details>
+<summary>Answer</summary>
+
+The newest segment — the only one open for writing. It rolls when either `segment.bytes` (default 1 GiB) or `segment.ms` (default 7 days) is reached. The active segment is never deleted by retention and never compacted, which is why both limits matter operationally and not just as trivia.
+
+</details>
+
+**M2.3** — What deletes data from a Kafka topic?
+
+<details>
+<summary>Answer</summary>
+
+Retention policy, never consumption. `retention.ms` deletes segments older than an age; `retention.bytes` caps bytes per partition and drops the oldest first. With `cleanup.policy=compact` the question changes from age to key: the cleaner keeps only the newest record per key. In every case deletion happens at segment granularity, not per record.
+
+</details>
+
+### Mid
+
+**M2.4** — Why is the offset index sparse rather than one entry per record?
+
+<details>
+<summary>Answer</summary>
+
+One entry roughly every `log.index.interval.bytes` (4 KiB) instead of per record. A dense index would cost memory proportional to record count, and these files are memory-mapped, so it would compete for exactly the page-cache memory that makes reads fast. Sparse lookup plus a short forward scan in the `.log` is the better trade — which is why the final step of resolving an offset is a scan, not a direct hit.
+
+</details>
+
+**M2.5** — You set retention.ms=60000 on a low-traffic topic and nothing is deleted. Why?
+
+<details>
+<summary>Answer</summary>
+
+Deletion works at segment granularity and never touches the active segment. On a low-traffic topic the active segment has not rolled, because rolling needs `segment.bytes` (1 GiB) or `segment.ms` (7 days) — so every record is eligible and none can be removed, since they share a file with records that are not. The fix is to lower `segment.ms` so segments close. Retention is a floor on data lifetime, never a ceiling: the real guarantee is at least `retention.ms`, plus up to one segment's worth of time, plus up to one `log.retention.check.interval.ms`.
+
+</details>
+
+**M2.6** — What is a tombstone, and how long does it live?
+
+<details>
+<summary>Answer</summary>
+
+A record with a null value on a compacted topic. It marks the key as deleted; the cleaner removes both the tombstone and every earlier record for that key. It survives for `delete.retention.ms` (default 24 hours) after the key becomes cleanable, so that consumers have a window to observe the deletion — a consumer offline longer than that can miss the delete entirely and keep a stale value, which is a real correctness bug in CDC and cache-invalidation pipelines.
+
+</details>
+
+### Senior
+
+**M2.7** — Explain why Kafka is fast as four distinct mechanisms, and say how the fourth makes the third possible.
+
+<details>
+<summary>Answer</summary>
+
+**Sequential I/O** — appends are sequential and the index files keep reads sequential too, resolving an offset to a byte position rather than walking the log. **Page cache** — writes are not fsynced per record; durability comes from replication, so a broker process crash loses nothing (the cache is the kernel's), and the JVM heap stays small, keeping GC out of the request path. **Zero-copy** — recent data is already in page cache in the format the consumer expects, so `sendfile` moves it straight to the socket with no user-space copy and no deserialisation. **Batching** — records are stored and shipped as compressed batches in a format byte-identical to the wire format, so the broker does no per-record work at all. That identity is what makes zero-copy possible: any parsing or re-framing would force the broker to touch the bytes. The through-line is that Kafka is fast because the broker was given almost nothing to do, and all four follow from refusing to keep per-message state.
+
+</details>
+
+**M2.8** — When does Kafka not get zero-copy, and what does it cost?
+
+<details>
+<summary>Answer</summary>
+
+When the connection is encrypted. TLS has to encrypt the bytes, which means pulling them into user space, so `sendfile` cannot be used and both throughput and broker CPU degrade measurably — a capacity-planning input rather than trivia, and the reason an encrypted cluster is not a drop-in swap for a plaintext one. Historically there was a second case: a client requesting an older message format forced the broker to down-convert, losing zero-copy and spiking CPU. Kafka 4.0 removed message formats v0 and v1 (KIP-724) along with `message.format.version`, so on a 4.x broker that case no longer exists.
+
+</details>
+
+**M2.9** — A compacted topic feeds a cache. What correctness problems does compaction introduce that a consumer author must handle?
+
+<details>
+<summary>Answer</summary>
+
+**Offsets have gaps** — compaction keeps original offsets and removes records between them, so any logic assuming offset+1, or counting records to infer progress, is wrong. **Intermediate values disappear** — a consumer reading from the tail sees only the latest value per key, so it cannot be used to reconstruct a history or to react to every transition; only a consumer keeping up at the head sees them all. **Tombstones expire** — after `delete.retention.ms` the tombstone is gone, so a consumer offline longer than that never learns the key was deleted and keeps a stale entry forever. The fix is usually a periodic full rebuild from the compacted log rather than trusting an incrementally maintained cache. **The active segment is never compacted**, so the head always holds uncompacted duplicates: handlers must be idempotent, since the same key arrives repeatedly.
+
+</details>
+
+**M2.10** — Make the case for tiered storage, and say what it costs.
+
+<details>
+<summary>Answer</summary>
+
+Two arguments, and the second is the stronger one. **Cost:** long retention stops dictating broker disk size — keeping a year of history becomes an object-storage bill instead of a cluster-sizing problem. **Recovery time:** replacing a broker previously meant replicating every byte it held, so rebuild time scaled with retention; with most history remote a new broker pulls only the local window, dropping rebuild from hours to minutes. That also removes a hidden constraint where long retention made clusters slow to heal and therefore riskier to operate. The costs: a read-latency cliff for consumers that fall behind into remote segments, a second storage system in the failure and security surface, and no support for compacted topics. The honest framing is that tiered storage decouples retention from cluster size — if retention is not the thing sizing your cluster, it buys you little.
+
+</details>
