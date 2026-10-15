@@ -1,0 +1,40 @@
+  <h2 id="a-m1">Model answers — module 1</h2>
+
+  <h3>Q7 · 3 partitions, 30 parallel consumers, ordering per <code>user_id</code></h3>
+  <p>Four options. The useful move in an interview is to say out loud which of them actually removes the three-partition ceiling and which only works around it, then recommend one.</p>
+
+  <p><strong>1 · Worker pool behind each consumer.</strong> Three consumers, one per partition; each hashes <code>user_id</code> and dispatches to a fixed worker, so records for one user stay on one worker and stay in order. Keeps the topic untouched, and it is the only option here that needs no migration.</p>
+  <p>The costs are all in offset management. A commit says “everything up to this offset is done”, but with a pool the records in flight finish out of order, so you may only commit up to the <em>lowest unfinished</em> offset — which means tracking completion per record and holding the commit back behind the slowest worker. On rebalance the partition is revoked while work is still in flight: either drain the pool inside the revoke callback or accept reprocessing, which makes idempotent handlers a requirement rather than a nicety. Add bounded queues, or a slow worker turns into unbounded memory growth and then a <code>max.poll.interval.ms</code> eviction.</p>
+
+  <p><strong>2 · Share group (KIP-932).</strong> Removes the partition ceiling outright — many consumers per partition, per-record acknowledgement. It also removes ordering entirely, which is the requirement. So this answers half the question and fails the other half; name it, reject it, and move on. Mentioning it without rejecting it reads as not having checked the constraint.</p>
+
+  <p><strong>3 · Repartition into a new topic.</strong> A new topic with 30+ partitions keyed by <code>user_id</code> is the only option that genuinely raises the ceiling while keeping ordering. Note that it has to be a new topic: <code>--alter --partitions</code> on the existing one moves roughly half the keys and breaks ordering at the cutover.</p>
+  <p>The cost is the migration. Producers have to switch over at a point in time; consumers have to read both topics until the old one is drained; and for any key in flight across the switch, ordering cannot be guaranteed, because its history is on one topic and its future on another. The usual mitigations are to drain with the producer stopped, or to accept a defined inconsistency window and make consumers tolerate it.</p>
+
+  <p><strong>4 · Two-stage pipeline.</strong> Consume the three partitions and re-key into a wide internal topic, then run 30 consumers against that. Ordering is clean on the second stage, the first stage stays small, and the original topic is untouched. The price is an extra hop, extra storage, and at-least-once between the stages — so again, idempotent handlers.</p>
+
+  <p><strong>Recommendation.</strong> If 30-way parallelism is needed because processing is slow rather than because the input rate is high, option 1 is enough and costs no migration — the three partitions can feed far more throughput than three threads can consume. If the input rate itself is the problem, only options 3 and 4 help, because a partition is read by one fetch stream and that is the real ceiling. Saying which case you are in, and why, is the answer; the list by itself is not.</p>
+
+  <h3>Q8 · Scope of the ordering guarantee, and three ways to lose it with the key set</h3>
+  <p><strong>Scope:</strong> within a single partition, and only while the producer is configured correctly. There is no topic-wide ordering and there never can be: it would need a shared clock or a single sequencer, and either one undoes the parallelism the design exists for.</p>
+
+  <p><strong>1 · Producer retries.</strong> The retry is not what reorders — the combination is. With <code>max.in.flight.requests.per.connection &gt; 1</code>, batch 2 can be in flight while batch 1 is being retried, so batch 2 lands first and the partition now holds them out of order. With <code>max.in.flight=1</code> retries are safe but throughput drops. The real fix is <code>enable.idempotence=true</code>: the producer attaches a producer id and a per-partition sequence number, and the broker rejects anything out of sequence, so ordering holds with up to five requests in flight. That number matters — idempotence caps <code>max.in.flight</code> at 5 for exactly this reason, and an interviewer will ask.</p>
+
+  <p><strong>2 · Concurrency after <code>poll()</code>.</strong> Kafka delivered the batch in order; handing it to a thread pool undoes that in your own process. The fix is not to avoid threads but to partition them the same way Kafka does: hash the key to a fixed worker so one key is always handled by one thread, sequentially. The commit discipline from Q7 comes with it.</p>
+
+  <p><strong>3 · Raising the partition count.</strong> The key's hash is taken modulo the partition count, so changing that count moves roughly half the keys while their existing records stay where they were. A consumer following one key sees its history stop on one partition and resume on another, with no relation between the two.</p>
+
+  <p>A fourth, worth having ready: consuming through a share group, which trades ordering away by design.</p>
+
+  <h3>Q9 · Why Kafka is fast despite writing to disk</h3>
+  <p>Four distinct mechanisms. Naming them is the easy half; the interview is in what each one actually does.</p>
+
+  <p><strong>1 · Sequential I/O.</strong> A partition is an append-only file, so writes are sequential, and sequential throughput beats random access by an order of magnitude on spinning disks and still substantially on SSDs. The <code>.index</code> and <code>.timeindex</code> files preserve this for reads: an offset is resolved to a byte position by lookup rather than by scanning, so reads stay sequential too.</p>
+
+  <p><strong>2 · Page cache instead of an application cache.</strong> Writes land in the OS page cache and are not fsynced per record — the broker acknowledges as soon as the data is in memory, and durability comes from replication to other brokers rather than from flushing to the platter. Two consequences people miss: a broker process crash loses nothing, because the page cache belongs to the kernel and not to the process; and the JVM heap stays small, which keeps GC pauses out of the request path. A conventional database would hold this data in its own buffer pool, paying for it twice in memory and once in GC.</p>
+
+  <p><strong>3 · Zero-copy on the read path.</strong> Recent data is already in the page cache, and Kafka ships it with <code>sendfile</code>: the kernel moves bytes from page cache straight to the socket, without copying them into user space and without the broker deserialising anything. The broker never materialises a record on a fetch.</p>
+
+  <p><strong>4 · Batching, and the format that makes the other three work.</strong> Records travel and are stored as compressed batches, and — this is the part that ties it together — the on-disk format is byte-identical to the wire format the producer sent and the consumer expects. So the broker does no per-record work at all: no parsing, no re-framing, no per-message bookkeeping. That identity is what makes zero-copy possible in the first place; if the broker had to transform anything, it would have to touch the bytes.</p>
+
+  <p>The through-line worth stating: Kafka is fast not because any one trick is clever, but because the broker was given almost nothing to do. Every one of these follows from refusing to keep per-message state.</p>

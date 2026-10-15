@@ -42,19 +42,19 @@
     },
     {
       "level": "Senior",
-      "done": false,
+      "done": true,
       "q": "A topic has 3 partitions and you need 30 consumers working in parallel while preserving order per user_id. How? Give the trade-offs of each option.",
       "a": "**Repartition to 30+ via a new topic** — keyed by `user_id`, migrated deliberately; preserves ordering going forward but is a migration, and the old data's ordering across the cutover is lost. **Fan out inside the consumer** — one consumer per partition that dispatches to a worker pool keyed by `user_id`, so each key is handled by exactly one worker sequentially; keeps 3 partitions but you now own the in-process queueing, backpressure and offset-commit discipline (commit only up to the lowest unfinished record). **Share group** — removes the partition ceiling outright, but gives up ordering entirely, so it answers the parallelism half and fails the ordering half. **Two-stage pipeline** — consume 3 partitions and re-key into a wider internal topic; buys clean ordering at the cost of an extra hop, extra storage and at-least-once semantics between stages. The honest framing is that 3 partitions is the real constraint and only the first and fourth options actually remove it."
     },
     {
       "level": "Senior",
-      "done": false,
+      "done": true,
       "q": "At what scope does Kafka guarantee ordering? Name three ways to lose it even with the key set correctly.",
       "a": "Ordering is guaranteed **within a partition only**, and only if the producer is configured correctly — never across partitions or topic-wide, because there is no shared clock and no global sequencer. Ways to lose it with a correct key: producer retries with `max.in.flight.requests.per.connection > 1` and idempotence off, so a later request lands ahead of one being retried; raising the partition count, which moves the key while its old records stay behind; and handing records to a thread pool after `poll()`, where Kafka delivered them in order and the application reordered them. A fourth: consuming through a share group, which trades ordering for parallelism."
     },
     {
       "level": "Senior",
-      "done": false,
+      "done": true,
       "q": "Why is Kafka fast despite writing to disk? Answer at the mechanism level.",
       "a": "Appending to a log is sequential I/O, which on spinning disks and SSDs alike is an order of magnitude faster than random access — but that is only the first third of the answer. Writes go to the OS **page cache** rather than being fsynced per record, so the broker returns as soon as the data is in memory and durability comes from replication to other brokers instead of from flushing; a broker restart loses nothing because the page cache is the kernel's, not the process's. Reads of recent data are served from that same page cache, and Kafka sends them with **`sendfile`** so bytes go from page cache straight to the socket without being copied into user space or re-encoded — the broker never materialises the records at all. On top of that, records travel in **compressed batches** written to the log in the exact wire format the producer sent and the consumer expects, so the broker does no per-record work: no parsing, no re-framing, no per-message bookkeeping. The JVM heap stays small because the data lives in the kernel's cache, which also keeps GC pauses out of the path."
     }
