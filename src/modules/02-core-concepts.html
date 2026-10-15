@@ -96,7 +96,7 @@ Topic: lab01.orders  Partition: 2  Leader: 1  Replicas: 1,2,3  Isr: 1,2,3</pre>
   </table></div>
 
   <h2 id="lab01">Lab 01 — a three-broker KRaft cluster</h2>
-  <p>In <code>labs/lab01/</code>: a <code>docker-compose.yml</code> (three nodes in combined mode plus Kafka UI) and five Python scripts.</p>
+  <p><strong><a href="lab-01-partitions.html">Open the step-by-step worksheet →</a></strong> — seven steps, each with a prediction to make before you run it. In <code>labs/lab01/</code>: a <code>docker-compose.yml</code> (three nodes in combined mode plus Kafka UI) and five Python scripts.</p>
 <pre><span class="c"># bring the cluster up; all three nodes healthy in ~30-60s</span>
 docker compose up -d &amp;&amp; docker compose ps
 <span class="c"># UI: http://localhost:8080 — bootstrap: localhost:19092,localhost:29092,localhost:39092</span>

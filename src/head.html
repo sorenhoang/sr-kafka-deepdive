@@ -140,6 +140,23 @@ pre .c{color:var(--muted)}
 .qlist input:checked + .qtext{color:var(--muted); text-decoration:line-through var(--rule-strong)}
 .qmeta{font-family:var(--font-mono); font-size:11px; color:var(--muted); margin-top:10px}
 
+/* lab worksheet */
+.step{border:1px solid var(--rule); border-radius:6px; background:var(--panel); padding:0 22px 18px; margin:26px 0}
+.step > h3{display:flex; gap:12px; align-items:baseline; margin:0 -22px 4px; padding:14px 22px; border-bottom:1px solid var(--rule); background:var(--sunk); border-radius:5px 5px 0 0}
+.step > h3 .sn{font-family:var(--font-mono); font-size:11px; color:var(--accent); flex:0 0 auto; letter-spacing:.06em}
+.step h4{font-family:var(--font-mono); font-weight:600; font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:20px 0 4px}
+.step h4.predict{color:var(--warn)}
+.step > :last-child{margin-bottom:0}
+.predict-box{border-left:3px solid var(--warn); background:var(--warn-soft); border-radius:3px; padding:11px 15px; margin:8px 0}
+.predict-box p{margin:4px 0; max-width:62ch}
+.predict-box :first-child{margin-top:0} .predict-box :last-child{margin-bottom:0}
+.labtrack{list-style:none; padding:0; margin:0}
+.labtrack li{border:0; background:transparent; margin:0}
+.labtrack label{display:flex; gap:10px; align-items:center; padding:0; cursor:pointer; font-family:var(--font-mono); font-size:11px; color:var(--muted)}
+.labtrack input{accent-color:var(--accent); width:14px; height:14px; margin:0}
+.labtrack input:checked + span{color:var(--accent)}
+.backlink{font-family:var(--font-mono); font-size:11px; margin:0 0 18px}
+
 @media (max-width:900px){
   .shell{grid-template-columns:minmax(0,1fr)}
   .rail{position:static; max-height:none; border-right:0; border-bottom:1px solid var(--rule); padding:26px 20px 22px}

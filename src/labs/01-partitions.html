@@ -1,0 +1,264 @@
+  <p class="backlink"><a href="index.html">← Kafka Deep Dive</a></p>
+  <p class="eyebrow">Module 1 · lab worksheet</p>
+  <h1>Lab 01 — Partitions, consumer groups and ordering</h1>
+  <p class="lede">Seven steps, each one proving a single claim from the notes. Every step asks you to predict the output before running it — that prediction is where the learning happens, so do not skip it. Reading the result afterwards only confirms what you already saw.</p>
+  <p class="qmeta">Expect 40-60 minutes. Nothing here depends on a previous lab.</p>
+
+  <ul class="labtrack qlist" data-store="lab01-steps" style="margin:22px 0">
+    <li><label><input type="checkbox" data-q="1"><span>1 · Cluster up, read describe</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span>2 · Produce without a key</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span>3 · Produce with a key</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span>4 · Consumer group assignment</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span>5 · Ordering, per partition vs topic</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span>6 · Grow the topic and break ordering</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span>7 · Look at the log on disk</span></label></li>
+  </ul>
+
+  <h2>Setup</h2>
+<pre>cd labs/lab01
+docker compose up -d
+docker compose ps          <span class="c"># all three nodes must say healthy — 30-60s</span>
+
+python3 -m venv .venv
+source .venv/bin/activate  <span class="c"># once per terminal, step 4 needs four of them</span>
+pip install -r requirements.txt
+cd scripts</pre>
+  <p>Kafka UI at <code>http://localhost:8080</code> if you want to watch the same thing in a browser. Bootstrap from the host is <code>localhost:19092,localhost:29092,localhost:39092</code>.</p>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 1</span>Cluster up, and read describe properly</h3>
+    <p><strong>Proves:</strong> a partition — not a topic — is the unit of replication, and leadership is spread across brokers so that writes scale.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>You are about to create a topic with 3 partitions and replication factor 3 on a 3-broker cluster. How many partition replicas exist in total across the cluster? How many of them accept writes?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec kafka1 /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create --topic lab01.orders --partitions 3 --replication-factor 3
+
+docker exec kafka1 /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --describe --topic lab01.orders</pre>
+
+    <h4>Expected</h4>
+<pre>Topic: lab01.orders  Partition: 0  Leader: 2  Replicas: 2,3,1  Isr: 2,3,1
+Topic: lab01.orders  Partition: 1  Leader: 3  Replicas: 3,1,2  Isr: 3,1,2
+Topic: lab01.orders  Partition: 2  Leader: 1  Replicas: 1,2,3  Isr: 1,2,3</pre>
+    <p>Which broker leads which partition will differ on your run — that assignment is made when the topic is created. What must hold is the shape: three lines, three replicas each, <code>Isr</code> identical to <code>Replicas</code>, and the leaders spread across all three brokers rather than piled on one.</p>
+
+    <h4>Why</h4>
+    <p>Nine replicas exist (3 partitions × 3 copies) and exactly three of them accept writes — one leader per partition. That is the answer to the prediction, and it is also the reason Kafka scales writes: a producer sending to this topic is talking to three brokers at once, one per partition. A topic with one partition, however many replicas, writes to exactly one broker.</p>
+    <p><code>Replicas</code> is ordered by preference; the first entry is the <strong>preferred leader</strong>, the one Kafka returns to after a failure heals. <code>Isr</code> is the set currently keeping up. Equal lists mean a healthy cluster — you will see them diverge in M3.</p>
+
+    <h4>Check yourself</h4>
+    <p>If you created this topic with <code>--partitions 1 --replication-factor 3</code>, how many brokers would serve its writes? What would that do to the cluster's write throughput for this topic?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 2</span>Produce without a key</h3>
+    <p><strong>Proves:</strong> keyless records are batched by the sticky partitioner, not round-robined one at a time.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Twelve records, no key, three partitions. Write down the split you expect before running. Most people write 4 / 4 / 4.</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>python3 01_produce_no_key.py</pre>
+
+    <h4>Expected</h4>
+    <p>Not 4 / 4 / 4. You will typically see most or all twelve land on one partition, or a lopsided split like 12/0/0 or 7/5/0. The exact numbers vary between runs and that variation is itself the point.</p>
+
+    <h4>Why</h4>
+    <p>With a null key the producer uses the <strong>sticky partitioner</strong>: it picks one partition and keeps filling the same batch until the batch reaches <code>batch.size</code> or <code>linger.ms</code> expires, and only then switches to another partition. Twelve small records produced in a tight loop fit comfortably inside one batch, so they go to one place.</p>
+    <p>This is a throughput optimisation. One batch to one partition is one request to one broker; round-robin per record would mean three requests of four records each, three times the request overhead for the same data. Kafka chose fewer, larger requests — and it can, because without a key you have declared that you do not care where records land.</p>
+
+    <h4>Check yourself</h4>
+    <p>Open <code>01_produce_no_key.py</code> and change <code>"linger.ms": 0</code> to <code>50</code>, then re-run. Does the distribution get more or less even, and why? Then consider: if your consumers lag on one partition and that topic has null keys, is the partitioner the cause or a symptom?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 3</span>Produce with a key</h3>
+    <p><strong>Proves:</strong> a key maps to a partition deterministically, and that mapping is the only ordering mechanism Kafka offers.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Five keys, three records each. Will the three records for <code>user-1</code> land on the same partition? Will <code>user-1</code> and <code>user-2</code> land on the same one? Will the five keys be distributed evenly across the three partitions?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>python3 02_produce_with_key.py</pre>
+
+    <h4>Expected</h4>
+<pre>user-1   -> partition [2]  ok (stable)
+user-2   -> partition [2]  ok (stable)
+user-3   -> partition [2]  ok (stable)
+user-4   -> partition [1]  ok (stable)
+user-5   -> partition [1]  ok (stable)</pre>
+    <p>Every key lands on exactly one partition — that is deterministic and will match on any cluster, because it is pure arithmetic on the key bytes. But the spread across partitions is <em>not</em> even, and with five keys it can easily leave one partition empty.</p>
+
+    <h4>Why</h4>
+<pre>partition = toPositive(murmur2(keyBytes)) % numPartitions</pre>
+    <p>A hash, nothing more. Same key, same bytes, same partition, forever — no state is kept anywhere, which is why any producer in any language agrees without coordinating. Even distribution is a statistical property of having many keys, not a guarantee; a handful of keys can collide on one partition, and a single very hot key puts all of its traffic on one broker no matter how many partitions you have. That is the <strong>hot partition</strong> problem, and M10 comes back to it.</p>
+
+    <h4>Check yourself</h4>
+    <p>Open the partition calculator on the notes page and enter <code>user-1</code> with 3 partitions. Does it agree with what the cluster just did? It should, byte for byte — and that is worth confirming, because it means you can reason about key placement without a broker in front of you.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 4</span>Consumer group assignment and rebalance</h3>
+    <p><strong>Proves:</strong> one partition goes to exactly one consumer in a group, so partition count is the parallelism ceiling; and separate groups are fully independent.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Three partitions. You will start consumers one at a time in the same group. Write down what each of the first three gets. Then: what does the fourth get? And when the fourth joins, does anything happen to the first three?</p>
+    </div>
+
+    <h4>Run</h4>
+    <p>Four terminals, each with its own <code>source .venv/bin/activate</code>. Start them one at a time and read the output of the ones already running before you start the next.</p>
+<pre><span class="c"># terminal 1</span>
+python3 03_consumer_group.py g1 c1
+<span class="c"># terminal 2, after c1 has printed its assignment</span>
+python3 03_consumer_group.py g1 c2
+<span class="c"># terminal 3</span>
+python3 03_consumer_group.py g1 c3
+<span class="c"># terminal 4 — three partitions, four consumers</span>
+python3 03_consumer_group.py g1 c4</pre>
+
+    <h4>Expected</h4>
+<pre>[c1] ASSIGNED  -> [0, 1, 2]      <span class="c"># alone, it owns everything</span>
+[c1] REVOKED   -> [0, 1, 2]      <span class="c"># c2 joins: rebalance</span>
+[c1] ASSIGNED  -> [0, 1]
+[c2] ASSIGNED  -> [2]
+...
+[c4] ASSIGNED  -> NO PARTITIONS (idle)</pre>
+    <p>The important detail is the <code>REVOKED</code> line on the <em>existing</em> consumers. A new member does not simply take a free partition — the whole group stops, gives everything back, and is reassigned.</p>
+
+    <h4>Why</h4>
+    <p>Each partition is owned by exactly one consumer in a group, so the fourth consumer has nothing to own and sits idle. Adding processes past the partition count buys you nothing; the only way up is more partitions, which step 6 shows is a one-way door.</p>
+    <p>The stop-the-world revoke is the cost of a rebalance, and in production it is what makes a flapping consumer expensive: every flap pauses the entire group. Cooperative sticky assignment and the newer KIP-848 protocol exist to shrink exactly this window — M6.</p>
+
+    <h4>Then run, while the group is live</h4>
+<pre>docker exec kafka1 /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --describe --group g1</pre>
+    <p>This is the view you will actually use in production: which consumer owns which partition, the committed offset, the log end offset, and the lag between them. Learn to read it now, while you know what the right answer looks like.</p>
+
+    <h4>Then: a second group</h4>
+<pre>python3 03_consumer_group.py g2 x1</pre>
+    <p><code>g2</code> replays everything from the beginning while <code>g1</code> is still running and entirely unaffected. One topic is serving a queue (consumers inside <code>g1</code> splitting work) and a pub/sub fan-out (<code>g1</code> and <code>g2</code> both seeing all records) at the same time, with no exchange and no copy of the data. Progress for each group lives in <code>__consumer_offsets</code> keyed by <code>(group.id, topic, partition)</code>.</p>
+
+    <h4>Check yourself</h4>
+    <p>Kill <code>c2</code> with Ctrl+C and watch the other terminals. How long before its partition is reassigned, and what decides that delay? (Look up <code>session.timeout.ms</code> — then note that a consumer that leaves cleanly announces itself, while one that is killed hard must be timed out.)</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 5</span>Ordering: inside a partition vs across the topic</h3>
+    <p><strong>Proves:</strong> "Kafka preserves order" is only ever true at partition scope.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Two keys, A and B, five numbered events each, produced strictly alternating: A-0, B-0, A-1, B-1, and so on. When one consumer reads the whole topic, will it see them in that produced order?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec kafka1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --topic lab01.orders.ordering --partitions 3 --replication-factor 3
+python3 04_ordering_demo.py</pre>
+
+    <h4>Expected</h4>
+    <p>The consumer drains one partition before moving to the next, so you see all of A's events together and all of B's together — not the interleaving you produced. Within each key the sequence numbers are strictly increasing.</p>
+
+    <h4>Why</h4>
+    <p>Each partition is a separate file and a separate fetch. There is no shared clock and no global sequencer, so "the order records were produced in" across partitions is not information Kafka has — and could not provide without serialising every write through one broker, which is the throughput it exists to avoid.</p>
+    <p>What it does guarantee is per-key order, because the key pinned both A's events to one partition and B's to another. That is the whole trick, and the sentence worth memorising: <em>order at partition scope; to get order at business-entity scope, key by entity id, enable the idempotent producer, and process each partition sequentially.</em></p>
+
+    <h4>Check yourself</h4>
+    <p>Suppose a bug report says "the cancel event was processed before the create event for order 42". Given everything above, name three places that could have gone wrong — only one of which is Kafka's doing.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 6</span>Grow the topic and watch ordering break</h3>
+    <p><strong>Proves:</strong> increasing the partition count moves keys, and it cannot be undone. This is the step that matters most in this lab.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Before running anything: of ten keys, how many do you expect to change partition when the topic goes from 3 to 6? And will Kafka let you go back from 6 to 3?</p>
+    </div>
+
+    <h4>Run — offline prediction first</h4>
+<pre>python3 05_key_remap.py        <span class="c"># no broker needed, pure arithmetic</span></pre>
+<pre>key         3 parts  6 parts   moved?
+user-1            2        2   -
+user-3            2        5   YES -&gt; ordering lost
+user-5            1        4   YES -&gt; ordering lost
+user-8            0        3   YES -&gt; ordering lost
+...
+5/10 keys changed partition going from 3 -&gt; 6</pre>
+
+    <h4>Then confirm against the real cluster</h4>
+<pre>docker exec kafka1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --alter --topic lab01.orders --partitions 6
+python3 02_produce_with_key.py</pre>
+    <p>Compare the key-to-partition mapping printed now against what step 3 printed. It should match the script's prediction exactly, because both are computing the same hash.</p>
+
+    <h4>Then try to go back</h4>
+<pre>docker exec kafka1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --alter --topic lab01.orders --partitions 3</pre>
+    <p>Kafka refuses. Read the error text rather than skimming it.</p>
+
+    <h4>Why</h4>
+    <p>The partition count is the divisor in <code>hash(key) % numPartitions</code>, so changing it rewrites the mapping for roughly half the keys. Nothing moves the <em>existing</em> records, though: <code>user-3</code>'s history stays on partition 2 while its new events go to partition 5. A consumer following that key now sees a gap and then a fresh sequence, in no relation to each other.</p>
+    <p>Shrinking is refused because each partition is its own log with its own offset sequence. Merging two logs would mean inventing offsets that consumers have already committed against, and there is no correct answer to what the merged order should be. So partition count only ever goes up, and the increase itself is a breaking change for ordered consumers.</p>
+    <p>In production this means: pick the partition count with growth in mind at creation time, and when you really must resize an ordered topic, create a new one and migrate deliberately rather than running <code>--alter</code>.</p>
+
+    <h4>Check yourself</h4>
+    <p>Your team needs to go from 6 to 24 partitions on a topic keyed by <code>user_id</code>, and ordering per user is a business requirement. Sketch the migration. Where does the cutover happen, and what is the window during which ordering cannot be guaranteed?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 7</span>Look at the log on disk</h3>
+    <p><strong>Proves:</strong> a partition really is a file, and sets up everything in M2.</p>
+
+    <h4>Run</h4>
+<pre>docker exec kafka1 ls -la /tmp/kraft-combined-logs/lab01.orders-0/
+
+docker exec kafka1 /opt/kafka/bin/kafka-dump-log.sh \
+  --files /tmp/kraft-combined-logs/lab01.orders-0/00000000000000000000.log \
+  --print-data-log | head -20</pre>
+
+    <h4>What to notice</h4>
+    <ul>
+      <li>The directory is named <code>&lt;topic&gt;-&lt;partition&gt;</code>. There is no directory for the topic itself — the topic is a name in metadata, nothing more.</li>
+      <li><code>.log</code> holds the records; <code>.index</code> maps offsets to byte positions; <code>.timeindex</code> maps timestamps to offsets. The filename is the <strong>base offset</strong> of the segment, zero-padded — which is how Kafka finds the right file for an offset without scanning.</li>
+      <li>In the dump: <code>baseOffset</code>, <code>lastOffset</code>, <code>count</code>, <code>producerId</code>, <code>isTransactional</code>. Note that records arrive in <strong>batches</strong> — the batch, not the record, is the unit the broker stores and ships.</li>
+    </ul>
+    <p>Those three fields are the thread into the next three modules: the segment and index files are M2, <code>producerId</code> is the idempotent producer in M5, and <code>isTransactional</code> is exactly-once in M7.</p>
+  </div>
+
+  <h2>Tear down</h2>
+<pre>docker compose down -v</pre>
+  <p>The <code>-v</code> removes the volumes. Without it the next <code>up</code> finds an old <code>CLUSTER_ID</code> and the brokers refuse to form a quorum — the most common way this lab fails on a second run.</p>
+
+  <h2>When something goes wrong</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+    <tbody>
+      <tr><td><code>ModuleNotFoundError: No module named 'confluent_kafka'</code></td><td>The venv is not active in this terminal. <code>source .venv/bin/activate</code>, then confirm with <code>which python3</code> — it must point inside <code>.venv</code>.</td></tr>
+      <tr><td>A node never reports healthy</td><td><code>docker compose logs kafka1 | tail -50</code>. Almost always a stale <code>CLUSTER_ID</code> in an old volume: <code>docker compose down -v</code> and start again.</td></tr>
+      <tr><td>Producer hangs or times out</td><td>The brokers advertise <code>localhost:19092/29092/39092</code> to the host. If you changed the ports in <code>docker-compose.yml</code>, <code>KAFKA_ADVERTISED_LISTENERS</code> has to change with them.</td></tr>
+      <tr><td>Consumer prints nothing</td><td>It has already committed past these records under that group id. Use a new <code>group.id</code>, or reset: <code>kafka-consumer-groups.sh --group g1 --topic lab01.orders --reset-offsets --to-earliest --execute</code> with no live members.</td></tr>
+      <tr><td>Rebalance seems instant, unlike production</td><td><code>KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0</code> is set deliberately so the lab does not make you wait. Never 0 in production.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Done when</h2>
+  <p>You can answer these without looking anything up: why twelve keyless records do not split evenly; why a fourth consumer on three partitions is useless; why half the keys move when a topic grows; and why Kafka refuses to shrink one. If any of the four is shaky, the step that proves it is worth running a second time — the commands are cheap, the prediction is the expensive part.</p>

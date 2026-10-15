@@ -3,6 +3,7 @@
 
 Public output (committed):
   docs/index.html    — standalone notes page for GitHub Pages
+  docs/lab-NN.html   — one standalone worksheet per file in src/labs/
   dist/artifact.html — same body without the HTML skeleton, for publishing as an
                        Artifact, which supplies its own skeleton
   QUIZ.md            — every question from every module, Junior to Senior, with the
@@ -151,6 +152,11 @@ def main():
     # file or directory whose name starts with an underscore.
     (ROOT / "docs" / ".nojekyll").touch()
 
+    labs = sorted((SRC / "labs").glob("*.html")) if (SRC / "labs").is_dir() else []
+    for lab in labs:
+        body = '<main class="solo">\n' + read(lab) + "</main>\n"
+        (ROOT / "docs" / f"lab-{lab.stem}.html").write_text(standalone(head, body, foot), encoding="utf-8")
+
     ordered = [quizzes[s] for s in sorted(quizzes)]
     (ROOT / "QUIZ.md").write_text(quiz_markdown(ordered), encoding="utf-8")
 
@@ -159,6 +165,8 @@ def main():
     for p in modules + answers:
         print(f"  - {p.relative_to(SRC)}")
     print("  -> docs/index.html")
+    for lab in labs:
+        print(f"  -> docs/lab-{lab.stem}.html")
     print("  -> dist/artifact.html")
     print(f"  -> QUIZ.md ({len(ordered)} module(s), {total} questions)")
 

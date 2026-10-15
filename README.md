@@ -9,8 +9,10 @@ senior backend / distributed systems interviews. Targets **Kafka 4.x (KRaft-only
 Each module follows the same four steps:
 
 1. **Theory** — mechanism plus the design reasoning behind it, written up on the notes site.
-2. **Hands-on lab** — a runnable Docker cluster and scripts, each with an explicit
-   *what to watch for* so the behaviour is observed rather than read about.
+2. **Hands-on lab** — a runnable Docker cluster and scripts, with a worksheet that
+   walks the steps one at a time. Every step asks for a prediction before the command
+   is run, because the prediction is where the learning is; reading the output
+   afterwards only confirms what was already seen.
 3. **Tiered questions** — Junior → Mid → Senior. Senior answers get written out and
    graded against *missing the point / correct but shallow / senior level*.
 4. **Answers** — the senior-tier questions get answered in writing and graded. Only
@@ -50,11 +52,13 @@ src/                 notes source, one partial per module
   head.html          shared CSS and web fonts
   rail.html          sidebar navigation and module status
   modules/*.html     one file per module, assembled in filename order
+  labs/*.html        step-by-step lab worksheets, one standalone page each
   quiz/*.json        the questions and their short answers — single source of truth
   answers/*.html     long-form model answers to the senior-tier questions
   foot.html          partition calculator + checklist behaviour
 tools/build.py       assembles src/ (and private/src/) into the pages below
 docs/index.html      generated — standalone page for GitHub Pages
+docs/lab-*.html      generated — one worksheet page per src/labs/ file
 dist/artifact.html   generated — page body without the HTML skeleton
 QUIZ.md              generated — all questions, answers behind <details> toggles
 labs/lab00-log-vs-queue/
