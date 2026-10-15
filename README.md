@@ -28,13 +28,13 @@ questions have been answered and graded.
 M0 is complete: lab 00 run, junior and mid tiers self-assessed, Q7-Q9 answered and
 graded, Q10 answered from the model rather than attempted cold — worth retrying in M13.
 
-M1: lab 01 run, all three senior questions answered and graded. Junior and mid tiers
-are still to be self-assessed.
+M1 is complete: lab 01 run, junior and mid tiers self-assessed, all three senior
+questions answered and graded.
 
 | Module | Topic | Material | Lab run | Questions graded |
 |---|---|:--:|:--:|:--:|
 | M0 | Positioning: log vs queue, when not to use Kafka, Share Groups | ready | ✅ | ✅ |
-| M1 | Topic, partition, offset, replica, consumer group, ordering | ready | ✅ | partial |
+| M1 | Topic, partition, offset, replica, consumer group, ordering | ready | ✅ | ✅ |
 | M2 | Storage internals: segments, page cache, zero-copy, compaction | | | |
 | M3 | Replication, ISR, LEO vs high watermark, unclean leader election | | | |
 | M4 | KRaft: quorum controller, metadata log | | | |

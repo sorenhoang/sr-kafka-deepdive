@@ -195,10 +195,10 @@ pre .c{color:var(--muted)}
   </nav>
 
   <nav>
-    <a class="wip" href="#m1"><span class="n">M1</span><span>Core concepts</span></a>
-    <a class="wip" href="#calc"><span class="n">↳</span><span>Partition calculator</span></a>
-    <a class="wip" href="lab-01-partitions.html"><span class="n">↳</span><span>Lab 01 worksheet</span></a>
-    <a class="wip" href="#q-m1"><span class="n">↳</span><span>Questions</span></a>
+    <a class="done" href="#m1"><span class="n">M1</span><span>Core concepts</span></a>
+    <a class="done" href="#calc"><span class="n">↳</span><span>Partition calculator</span></a>
+    <a class="done" href="lab-01-partitions.html"><span class="n">↳</span><span>Lab 01 worksheet</span></a>
+    <a class="done" href="#q-m1"><span class="n">↳</span><span>Questions</span></a>
     <a class="done" href="#a-m1"><span class="n">↳</span><span>Model answers</span></a>
   </nav>
 
@@ -476,17 +476,17 @@ pip install -r requirements.txt &amp;&amp; cd scripts</pre>
     <h2 id="q-m1">Interview questions — module 1</h2>
   <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
   <ul class="qlist" data-store="m1-questions">
-    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Define topic, partition, offset and replica, and the relationships between them.</span></label></li>
-    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Why can't the number of useful consumers in a group exceed the partition count?</span></label></li>
-    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is the message key for? What happens when it is null?</span></label></li>
-    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>What are the consequences of increasing the partition count on a live topic? Can you decrease it, and why not?</span></label></li>
-    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Read `Replicas: 2,3,1 · Isr: 2,3` — what does it tell you?</span></label></li>
-    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Two groups read the same topic. Where is each group's progress kept, and how does Kafka keep them from interfering?</span></label></li>
+    <li><label><input type="checkbox" data-q="1" checked><span class="qtext"><span class="lvl">Junior</span>Define topic, partition, offset and replica, and the relationships between them.</span></label></li>
+    <li><label><input type="checkbox" data-q="2" checked><span class="qtext"><span class="lvl">Junior</span>Why can't the number of useful consumers in a group exceed the partition count?</span></label></li>
+    <li><label><input type="checkbox" data-q="3" checked><span class="qtext"><span class="lvl">Junior</span>What is the message key for? What happens when it is null?</span></label></li>
+    <li><label><input type="checkbox" data-q="4" checked><span class="qtext"><span class="lvl">Mid</span>What are the consequences of increasing the partition count on a live topic? Can you decrease it, and why not?</span></label></li>
+    <li><label><input type="checkbox" data-q="5" checked><span class="qtext"><span class="lvl">Mid</span>Read `Replicas: 2,3,1 · Isr: 2,3` — what does it tell you?</span></label></li>
+    <li><label><input type="checkbox" data-q="6" checked><span class="qtext"><span class="lvl">Mid</span>Two groups read the same topic. Where is each group's progress kept, and how does Kafka keep them from interfering?</span></label></li>
     <li><label><input type="checkbox" data-q="7" checked><span class="qtext"><span class="lvl hard">Senior · write it out</span>A topic has 3 partitions and you need 30 consumers working in parallel while preserving order per user_id. How? Give the trade-offs of each option.</span></label></li>
     <li><label><input type="checkbox" data-q="8" checked><span class="qtext"><span class="lvl hard">Senior · write it out</span>At what scope does Kafka guarantee ordering? Name three ways to lose it even with the key set correctly.</span></label></li>
     <li><label><input type="checkbox" data-q="9" checked><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why is Kafka fast despite writing to disk? Answer at the mechanism level.</span></label></li>
   </ul>
-  <p class="qmeta" data-count-for="m1-questions">3 / 9</p>
+  <p class="qmeta" data-count-for="m1-questions">9 / 9</p>
 
 
   <hr>

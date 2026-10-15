@@ -6,37 +6,37 @@
   "questions": [
     {
       "level": "Junior",
-      "done": false,
+      "done": true,
       "q": "Define topic, partition, offset and replica, and the relationships between them.",
       "a": "A **topic** is purely logical — a name; no file on disk is named after it. A **partition** is the real object: one append-only log on disk, and a topic is a set of them. An **offset** is a monotonically increasing integer scoped to one partition, so a record is uniquely identified by `(topic, partition, offset)` and there is no topic-wide offset. A **replica** is a copy of one partition on another broker; `replication.factor` applies per partition, with one leader serving all reads and writes and the followers fetching from it."
     },
     {
       "level": "Junior",
-      "done": false,
+      "done": true,
       "q": "Why can't the number of useful consumers in a group exceed the partition count?",
       "a": "Within one group each partition is assigned to exactly one consumer, so that assignment can never give a fifth consumer anything on a four-partition topic — it simply sits idle. Partition count is therefore the parallelism ceiling for a group, and it has to be chosen when the topic is created because raising it later is a one-way door that breaks key ordering."
     },
     {
       "level": "Junior",
-      "done": false,
+      "done": true,
       "q": "What is the message key for? What happens when it is null?",
       "a": "The key selects the partition via `toPositive(murmur2(keyBytes)) % numPartitions`, so the same key always lands on the same partition — that is the only mechanism Kafka offers for ordering related records. With a null key the **sticky partitioner** takes over: it fills one partition until the batch is full or `linger.ms` expires and only then switches, which is batching behaviour and not per-record round-robin."
     },
     {
       "level": "Mid",
-      "done": false,
+      "done": true,
       "q": "What are the consequences of increasing the partition count on a live topic? Can you decrease it, and why not?",
       "a": "Changing the partition count changes the divisor in the key hash, so roughly half the keys move to a different partition while their older records stay where they were — the consumer stops seeing a key's events in order across the cutover. You cannot decrease it: each partition is its own log with its own offset sequence, and merging two logs would mean inventing offsets that consumers have already committed against. The only order-preserving way to resize is a new topic plus a controlled migration."
     },
     {
       "level": "Mid",
-      "done": false,
+      "done": true,
       "q": "Read `Replicas: 2,3,1 · Isr: 2,3` — what does it tell you?",
       "a": "Three replicas are configured but only two are in sync: broker 1 has fallen behind by more than `replica.lag.time.max.ms` and has been dropped from the ISR. Broker 2 is first in the replica list, so it is the preferred leader. The practical consequence is that with `min.insync.replicas=2` you are one failure away from producers being rejected, and `acks=all` now means only those two replicas — the redundancy you think you have is not the redundancy you have."
     },
     {
       "level": "Mid",
-      "done": false,
+      "done": true,
       "q": "Two groups read the same topic. Where is each group's progress kept, and how does Kafka keep them from interfering?",
       "a": "Each group's committed offsets live in the internal compacted topic `__consumer_offsets`, keyed by `(group.id, topic, partition)`, so the groups never share a row and reading is non-destructive anyway. That is how one topic serves both shapes at once: consumers inside a group split partitions (queue), while separate groups each see the full stream (pub/sub). No exchange or copy is involved."
     },
