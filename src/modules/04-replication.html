@@ -1,0 +1,94 @@
+  <p class="eyebrow">Module 3</p>
+  <h1>Replication &amp; ISR</h1>
+  <p class="lede">The durability module. Everything here is one question asked in different ways: under which failures does Kafka lose an acknowledged write, and which settings move that line. This is where <code>acks=all</code> stops being a magic word.</p>
+
+  <h2 id="m3">Leaders, followers, and a fetch loop</h2>
+  <p>Each partition has one <strong>leader</strong> and <code>replication.factor - 1</code> <strong>followers</strong>. All produce and consume traffic goes to the leader. Followers are not pushed to — they run a fetch loop against the leader exactly like a consumer does, using the same protocol. There is no separate replication channel, which is a large part of why replication costs so little to implement and reason about.</p>
+  <p>Two offsets per replica matter:</p>
+  <ul>
+    <li><strong>LEO</strong> (log end offset) — the offset the next record will be written at. Every replica has its own.</li>
+    <li><strong>HW</strong> (high watermark) — on the leader, the <strong>minimum LEO across all in-sync replicas</strong>. This is the furthest point consumers are allowed to read.</li>
+  </ul>
+
+  <div class="callout">
+    <span class="tag">Why consumers cannot read past the high watermark</span>
+    <p>A record that only exists on the leader is not yet durable: if the leader dies, a follower that never received it becomes the new leader and the record is gone. Serving it would mean a consumer could read something that later ceases to exist — the log would appear to go backwards. Holding reads at the HW means <strong>anything a consumer can see has been replicated to every in-sync replica</strong>, so no surviving failover can take it away.</p>
+    <p>The visible cost is latency: a record is produced, and only becomes readable one replication round-trip later. That gap is not a bug, it is the durability guarantee showing itself.</p>
+  </div>
+
+  <h3>ISR — the set that actually decides everything</h3>
+  <p>The <strong>in-sync replica set</strong> is the replicas currently keeping up with the leader. A follower is in the ISR while it has fetched up to the leader's LEO within <code>replica.lag.time.max.ms</code> (default 30 s). Fall behind for longer — GC pause, slow disk, saturated network, a restart — and the leader removes it. Catch up again and it is re-added.</p>
+  <p>The ISR is not a static list and it is not <code>Replicas</code>. Almost every durability question comes down to <em>how large is the ISR at the moment of failure</em>, which is why <code>IsrShrinksPerSec</code> is a metric worth alerting on rather than merely graphing.</p>
+
+  <h2>acks and min.insync.replicas — read them as a pair</h2>
+  <p><code>acks</code> is a <strong>producer</strong> setting; <code>min.insync.replicas</code> is a <strong>topic/broker</strong> setting. Neither is sufficient alone, and the single most common durability misconfiguration is setting one and assuming the other.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th><code>acks</code></th><th>Leader responds when</th><th>Lost if</th></tr></thead>
+    <tbody>
+      <tr><td><code>0</code></td><td>Immediately — the producer does not wait</td><td>Anything at all. A network blip loses records silently; there is no retry because there is no response to retry on.</td></tr>
+      <tr><td><code>1</code></td><td>The leader has written to its own log</td><td>The leader dies before a follower replicates. The write was acknowledged and is gone — a silent loss, invisible to the producer.</td></tr>
+      <tr><td><code>all</code></td><td>Every replica <strong>in the ISR</strong> has the record</td><td>Only if the ISR had shrunk far enough first. This is the whole point below.</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout warn">
+    <span class="tag">Why acks=all alone guarantees nothing</span>
+    <p><code>acks=all</code> means "all replicas <em>in the ISR</em>", not "all replicas". If two of three followers fall behind and drop out, the ISR is just the leader — and <code>acks=all</code> is then satisfied by the leader alone. It has silently degraded to <code>acks=1</code>, with no error and no warning, at exactly the moment the cluster is least healthy.</p>
+    <p><code>min.insync.replicas</code> is the floor that closes this. With <code>min.insync.replicas=2</code>, a producer using <code>acks=all</code> gets <code>NOT_ENOUGH_REPLICAS</code> when the ISR drops below two — the write is <strong>rejected rather than silently under-replicated</strong>. You have chosen to fail loudly instead of losing data quietly.</p>
+  </div>
+
+  <p>The standard safe configuration, and the reasoning behind each number:</p>
+<pre>replication.factor   = 3     <span class="c"># tolerate one failure and still have a choice</span>
+min.insync.replicas  = 2     <span class="c"># a write needs leader + one follower</span>
+acks                 = all   <span class="c"># producer waits for the whole ISR</span></pre>
+  <p>RF 3 with min ISR 2 survives one broker loss while still accepting writes. Setting <code>min.insync.replicas=3</code> on RF 3 is a common mistake: it means <em>any</em> single broker failure stops writes entirely, trading all availability for a durability gain you mostly already had.</p>
+  <p>Worth knowing for a 4.x interview: since Kafka 3.0 the producer defaults are <code>acks=all</code> and <code>enable.idempotence=true</code> (KIP-679). Older answers that say "the default is <code>acks=1</code>" are out of date, and saying so is a cheap way to show the knowledge is current.</p>
+
+  <h2>Leader epoch, and why truncation used to lose data</h2>
+  <p>When a failed replica rejoins, it may hold records the new leader never had, so it must truncate before it can follow. The question is <em>truncate to where</em>.</p>
+  <p>Originally a recovering replica truncated to its own high watermark, which created a real divergence window: because the HW propagates to followers one round-trip after it advances, two replicas could disagree about it during a double failure, and committed records could be lost or the logs could silently diverge while both believed they were in sync.</p>
+  <p><strong>Leader epoch</strong> (KIP-101) fixed this. Every leader election increments an epoch number, and each replica keeps a <code>leader-epoch-checkpoint</code> file — you saw it in the lab 01 partition directory — mapping each epoch to the offset where it began. A recovering follower asks the leader "where did epoch N end?" and truncates to exactly that offset, instead of guessing from a watermark that may be stale. Deterministic, and no divergence.</p>
+  <p>You do not configure this. It is worth knowing because it is the honest answer to "has Kafka ever lost data in normal operation" — yes, before 0.11, through exactly this path.</p>
+
+  <h2>Unclean leader election</h2>
+  <p>Every in-sync replica is gone and only an out-of-sync one remains. Two choices, no third:</p>
+  <div class="scroll"><table>
+    <thead><tr><th><code>unclean.leader.election.enable</code></th><th>Behaviour</th><th>You are choosing</th></tr></thead>
+    <tbody>
+      <tr><td><code>false</code> (default)</td><td>The partition goes offline and stays offline until an in-sync replica returns</td><td><strong>Consistency.</strong> No acknowledged write is ever lost; the partition is simply unavailable, possibly for a long time.</td></tr>
+      <tr><td><code>true</code></td><td>An out-of-sync replica becomes leader immediately</td><td><strong>Availability.</strong> Writes resume at once, and every record the old leader had beyond this replica's log is permanently gone. Consumers that already read them see the log move backwards.</td></tr>
+    </tbody>
+  </table></div>
+  <p>This is the clearest CAP trade-off Kafka exposes, and the right answer in an interview is not a preference but a per-topic decision. Clickstream or metrics where a gap is survivable and downtime is not: enable it. A payment ledger: never — take the outage. Naming the topic class is what makes the answer senior; "it depends" without naming the dimension is not an answer.</p>
+
+  <h2>The data-loss matrix</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Configuration</th><th>One broker dies</th><th>Two brokers die</th><th>Whole ISR lost</th></tr></thead>
+    <tbody>
+      <tr><td><code>acks=1</code>, RF 3</td><td>Loss window — anything acked but not yet replicated</td><td>Same, wider</td><td>Loss</td></tr>
+      <tr><td><code>acks=all</code>, RF 3, <code>min.isr=1</code></td><td>Safe <em>if</em> the ISR was full; degrades to <code>acks=1</code> once it shrinks</td><td>Silent degradation, loss possible</td><td>Loss</td></tr>
+      <tr><td><code>acks=all</code>, RF 3, <code>min.isr=2</code></td><td>Safe, writes continue</td><td><strong>Writes rejected</strong> — no loss, reduced availability</td><td>Offline, no loss (unclean off)</td></tr>
+      <tr><td>Any of the above, unclean election on</td><td>—</td><td>—</td><td>Available, <strong>acknowledged writes lost</strong></td></tr>
+    </tbody>
+  </table></div>
+  <p>Read the third row as the design intent: <strong>Kafka's durability story is to refuse writes rather than to lose them</strong>, and every setting above either upholds that or opts out of it.</p>
+  <p>One failure mode this matrix does not cover: the page cache from M2. Because Kafka does not fsync per record, a simultaneous power loss across the whole ISR can lose data that every replica acknowledged. Replication is the durability mechanism, so correlated failure — one rack, one availability zone, one power domain — is the thing it cannot protect against. That is what <code>broker.rack</code> and rack-aware replica placement are for.</p>
+
+  <h2>What to watch</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Metric</th><th>Means</th></tr></thead>
+    <tbody>
+      <tr><td><code>UnderReplicatedPartitions</code></td><td>ISR smaller than the replica list. Non-zero is normal briefly during a restart; sustained non-zero is a problem.</td></tr>
+      <tr><td><code>UnderMinIsrPartitionCount</code></td><td>ISR below <code>min.insync.replicas</code> — <code>acks=all</code> producers are being rejected <em>right now</em>. This is the page, not the graph.</td></tr>
+      <tr><td><code>IsrShrinksPerSec</code> / <code>IsrExpandsPerSec</code></td><td>Flapping ISR: GC pauses, slow disks, network saturation. Usually the early warning before anything else fires.</td></tr>
+      <tr><td><code>OfflinePartitionsCount</code></td><td>Partitions with no leader at all. Non-zero means data is unavailable.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Also worth knowing: leadership drifts after failures heal, concentrating leaders on whichever brokers came back first. <code>auto.leader.rebalance.enable</code> (default true) periodically returns leadership to the preferred leader — the first entry in the replica list — and <code>kafka-leader-election.sh --election-type preferred</code> forces it. An unbalanced cluster is a throughput problem long before it is an availability one.</p>
+
+  <h2 id="lab03">Lab 03</h2>
+  <p><strong><a href="lab-03-replication.html">Open the step-by-step worksheet →</a></strong> — six steps: watch the high watermark stall while a follower is paused, watch the ISR shrink on a timer, kill brokers until <code>acks=all</code> is rejected, see <code>acks=1</code> accept the same write and understand why that is the loss window, then heal the cluster and rebalance leadership.</p>
+  <p>Step 2 is the one to do carefully. Pausing a follower and watching produced records become unreadable — then readable 30 seconds later when the ISR shrinks — is the high watermark made visible, and it is hard to forget afterwards.</p>
+
+  <!--QUIZ:03-replication-->

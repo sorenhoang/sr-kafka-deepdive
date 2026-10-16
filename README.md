@@ -31,15 +31,16 @@ graded, Q10 answered from the model rather than attempted cold — worth retryin
 M1 is complete: lab 01 run, junior and mid tiers self-assessed, all three senior
 questions answered and graded.
 
-M2 in progress: Q7 and Q8 answered and graded, Q9 and Q10 answered from the model
-rather than attempted cold. Lab 02 and the junior/mid tiers are still to do.
+M2 is complete: lab 02 run, junior and mid tiers self-assessed, Q7 and Q8 answered
+and graded. Q9 and Q10 were answered from the model rather than attempted cold —
+worth retrying in M13, alongside M0 Q9 and Q10.
 
 | Module | Topic | Material | Lab run | Questions graded |
 |---|---|:--:|:--:|:--:|
 | M0 | Positioning: log vs queue, when not to use Kafka, Share Groups | ready | ✅ | ✅ |
 | M1 | Topic, partition, offset, replica, consumer group, ordering | ready | ✅ | ✅ |
-| M2 | Storage internals: segments, page cache, zero-copy, compaction | ready | | partial |
-| M3 | Replication, ISR, LEO vs high watermark, unclean leader election | | | |
+| M2 | Storage internals: segments, page cache, zero-copy, compaction | ready | ✅ | ✅ |
+| M3 | Replication, ISR, LEO vs high watermark, unclean leader election | ready | | |
 | M4 | KRaft: quorum controller, metadata log | | | |
 | M5 | Producer internals, idempotent producer | | | |
 | M6 | Consumer internals, rebalance, KIP-848 | | | |
@@ -71,6 +72,8 @@ labs/lab00-log-vs-queue/
                      Kafka and RabbitMQ side by side: consuming does not delete
 labs/lab01/          three-broker KRaft cluster + Python scripts
 labs/lab02-storage/  single broker; segments, indexes, retention, compaction
+labs/lab03-replication/
+                     three brokers you break on purpose; ISR, high watermark, acks
 private/             gitignored — raw answers, grades and gap notes, local only
 ```
 

@@ -1,0 +1,211 @@
+  <p class="backlink"><a href="index.html">← Kafka Deep Dive</a></p>
+  <p class="eyebrow">Module 3 · lab worksheet</p>
+  <h1>Lab 03 — Replication, ISR and the durability line</h1>
+  <p class="lede">Six steps in which you break three brokers on purpose. One question asked five ways: under which failures does Kafka lose an acknowledged write? Step 2 makes the high watermark visible, which is the thing most people only ever read about.</p>
+  <p class="qmeta">Expect 50-70 minutes. Keep two terminals open throughout — one watching the ISR, one doing things.</p>
+
+  <ul class="labtrack qlist" data-store="lab03-steps" style="margin:22px 0">
+    <li><label><input type="checkbox" data-q="1"><span>1 · Cluster up, ISR watcher running</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span>2 · Pause a follower, watch the HW stall</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span>3 · ISR shrinks on its own timer</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span>4 · Kill brokers until acks=all is refused</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span>5 · acks=1 succeeds — the loss window</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span>6 · Heal, and rebalance leadership</span></label></li>
+  </ul>
+
+  <h2>Setup</h2>
+  <p>Broker ports clash with lab 01, so stop that first: <code>cd ../lab01 &amp;&amp; docker compose down</code>.</p>
+<pre>cd labs/lab03-replication
+docker compose up -d &amp;&amp; docker compose ps     <span class="c"># three healthy, ~45s</span>
+
+docker exec lab03-kafka1 /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create --topic lab03.durable --partitions 1 --replication-factor 3 \
+  --config min.insync.replicas=2
+
+python3 -m venv .venv
+source .venv/bin/activate                     <span class="c"># in BOTH terminals</span>
+pip install -r requirements.txt
+cd scripts</pre>
+  <p>One partition on purpose: one leader, two followers, nothing else moving while you break things.</p>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 1</span>Get the ISR on screen and leave it there</h3>
+    <p><strong>Proves:</strong> the ISR is a live set, not a configuration value.</p>
+
+    <h4>Run — terminal A, and leave it running for the whole lab</h4>
+<pre>python3 03_watch_isr.py 900</pre>
+    <p>It prints only when something changes, so a quiet screen means a healthy cluster.</p>
+
+    <h4>Expected</h4>
+<pre>[14:02:11] p0 leader=2 replicas=[1, 2, 3] isr=[1, 2, 3]</pre>
+
+    <h4>Why</h4>
+    <p>Three replicas, all in sync, one of them leader. <code>Replicas</code> is the fixed assignment made when the topic was created; <code>isr</code> is who is keeping up <em>right now</em>. Everything in this lab is about the gap between those two lists, and almost every durability question in an interview reduces to how large the ISR was at the moment of failure.</p>
+
+    <h4>Check yourself</h4>
+    <p>With <code>min.insync.replicas=2</code> and this ISR, how many brokers can you lose before <code>acks=all</code> writes stop being accepted? Write the number down — step 4 checks it.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 2</span>Pause a follower and watch the high watermark stall</h3>
+    <p><strong>Proves:</strong> consumers cannot read past the high watermark, and the HW is held back by the slowest in-sync replica.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>You will freeze one follower, then produce one record with <code>acks=1</code> — so the leader acknowledges without waiting for anyone. The producer gets a successful response and an offset. <strong>Can a consumer read that record?</strong> Answer before running it.</p>
+    </div>
+
+    <h4>Run — terminal B</h4>
+<pre><span class="c"># find a follower (anything in isr that is not the leader) from terminal A</span>
+docker pause lab03-kafka3
+
+python3 02_watch_hw.py 1</pre>
+
+    <h4>Expected</h4>
+<pre>produced hw-probe-9f2c41a8 at offset 12 with acks=1
+now polling as a consumer until it becomes readable...
+    1.0s  not readable yet
+    2.0s  not readable yet
+  ...
+   31.4s  readable after 31.4s</pre>
+
+    <h4>Why</h4>
+    <p>The record was on the leader's disk the whole time, with an offset the producer already knew. It was not readable because the <strong>high watermark</strong> — the minimum log end offset across the in-sync replicas — could not advance past the frozen follower, which was still in the ISR and still at its old offset.</p>
+    <p>That is the guarantee working. A record only on the leader is not durable: if the leader died now, a follower that never received it would be promoted and the record would be gone. Serving it would let a consumer read something that later ceases to exist, making the log appear to go backwards. So reads stop at the HW, and <strong>anything a consumer can see has reached every in-sync replica</strong>.</p>
+    <p>It became readable at ~30s because that is when <code>replica.lag.time.max.ms</code> expired and the leader evicted the frozen follower from the ISR. With a smaller ISR, the minimum LEO jumped forward and the HW with it. You just watched durability and availability trade places on a timer.</p>
+
+    <h4>Check yourself</h4>
+    <p>The producer was told the write succeeded at offset 12, thirty seconds before any consumer could see it. Is there any <code>acks</code> setting where the acknowledgement and the readability happen at the same moment? What does that tell you about using produce latency as a proxy for end-to-end latency?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 3</span>Watch the ISR shrink, then expand</h3>
+    <p><strong>Proves:</strong> ISR membership is a timer, and it is the early-warning signal in production.</p>
+
+    <h4>Run</h4>
+<pre><span class="c"># terminal A should already have printed the shrink during step 2:</span>
+<span class="c">#   p0 leader=2 replicas=[1, 2, 3] isr=[1, 2]</span>
+
+docker exec lab03-kafka1 /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --describe --under-replicated-partitions
+
+docker unpause lab03-kafka3</pre>
+
+    <h4>Expected</h4>
+    <p>The under-replicated query lists the partition while the follower is out. After unpausing, terminal A shows the ISR returning to <code>[1, 2, 3]</code> within a few seconds — rejoining is fast, because the follower only has to catch up on what it missed.</p>
+
+    <h4>Why</h4>
+    <p>A follower stays in the ISR while it has fetched up to the leader's log end offset within <code>replica.lag.time.max.ms</code> (default 30 s). A GC pause, a slow disk, a saturated link or a restart pushes it out; catching up puts it back. Nothing was reconfigured here — a frozen process looks exactly like a very slow one.</p>
+    <p>In production the metric to alert on is not the shrink itself but the <em>rate</em>: <code>IsrShrinksPerSec</code> flapping is the early warning that fires before anything else does, and it usually means GC, disk or network rather than a broker that is actually down.</p>
+
+    <h4>Check yourself</h4>
+    <p>Why does Kafka use a time threshold rather than a message-count threshold for ISR membership? (It used to have both. Think about what a sudden burst of traffic does to a count-based threshold on a perfectly healthy follower.)</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 4</span>Kill brokers until acks=all is refused</h3>
+    <p><strong>Proves:</strong> <code>min.insync.replicas</code> turns a silent degradation into a loud rejection.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Three replicas, <code>min.insync.replicas=2</code>. You kill one broker, then a second. At which point does an <code>acks=all</code> producer start failing, and what error does it get?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>python3 01_produce_acks.py all 5        <span class="c"># baseline: all healthy</span>
+
+docker stop lab03-kafka3
+python3 01_produce_acks.py all 5        <span class="c"># ISR = 2, still at the floor</span>
+
+docker stop lab03-kafka2
+python3 01_produce_acks.py all 5        <span class="c"># ISR = 1, below the floor</span></pre>
+
+    <h4>Expected</h4>
+<pre>acks=all: producing 5 records to lab03.durable
+  FAILED:    5
+    KafkaError{code=NOT_ENOUGH_REPLICAS,...}</pre>
+    <p>If the leader was on a broker you stopped, you will see a leader election first and a brief retry; the end state is the same.</p>
+
+    <h4>Why</h4>
+    <p>With one broker down the ISR is exactly 2, which equals <code>min.insync.replicas</code> — writes still succeed, but there is no margin left. With two down the ISR is 1, below the floor, and the leader rejects the write with <code>NOT_ENOUGH_REPLICAS</code>.</p>
+    <p>This is the setting earning its place. Without it, <code>acks=all</code> would be satisfied by the leader alone — because <strong>"all" means all replicas <em>in the ISR</em>, not all replicas</strong> — so it would silently become <code>acks=1</code> at exactly the moment the cluster is least healthy, with no error anywhere. <code>min.insync.replicas</code> converts that silent degradation into a visible failure.</p>
+    <p>The sentence worth keeping: <strong>Kafka's durability story is to refuse writes rather than lose them.</strong> A rejected produce here is the system doing its job.</p>
+
+    <h4>Check yourself</h4>
+    <p>Someone proposes <code>min.insync.replicas=3</code> on this RF-3 topic for "maximum safety". What actually happens the first time any single broker restarts for a routine upgrade?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 5</span>acks=1 succeeds — and that is the problem</h3>
+    <p><strong>Proves:</strong> the loss window is an acknowledged write with no second copy.</p>
+
+    <h4>Run — with two brokers still down</h4>
+<pre>python3 01_produce_acks.py 1 5</pre>
+
+    <h4>Expected</h4>
+    <p>All five delivered, with offsets. No error, no warning.</p>
+
+    <h4>Why</h4>
+    <p>The leader wrote to its own log and answered. There is exactly one copy of these five records in the cluster, and the producer was told they are safe. If this broker's disk fails now, or if it is the one that does not come back, those records are gone — and nothing upstream will ever know, because the write was acknowledged.</p>
+    <p>That is the entire argument for <code>acks=all</code> plus <code>min.insync.replicas</code>. Not that <code>acks=1</code> is slow or sloppy, but that it fails <em>silently</em>: the failure mode is a successful response. Compare the two commands you just ran — one errored loudly with everything intact, one succeeded quietly with data at risk. Most incidents are the second shape.</p>
+
+    <h4>Check yourself</h4>
+    <p>A team sets <code>acks=1</code> because <code>acks=all</code> "added latency". From M3 and from step 2, give them two numbers they should measure before accepting that trade — and name the question they have not asked.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 6</span>Heal the cluster, then put leadership back</h3>
+    <p><strong>Proves:</strong> recovery is not finished when the brokers come back.</p>
+
+    <h4>Run</h4>
+<pre>docker start lab03-kafka2 lab03-kafka3
+<span class="c"># watch terminal A: isr goes [1] -> [1,2] -> [1,2,3]</span>
+
+docker exec lab03-kafka1 /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --describe --topic lab03.durable
+
+docker exec lab03-kafka1 /opt/kafka/bin/kafka-leader-election.sh \
+  --bootstrap-server localhost:9092 --election-type preferred --all-topic-partitions</pre>
+
+    <h4>Expected</h4>
+    <p>The ISR refills one broker at a time. The leader is probably <em>not</em> the first entry in <code>Replicas</code> any more — it stayed with whichever broker survived. The preferred election moves it back.</p>
+
+    <h4>Why</h4>
+    <p>Leadership does not return on its own when a broker recovers; it stays where the failover put it. After a few incidents, leaders pile onto whichever brokers happened to survive, and that broker now serves all the traffic for those partitions while others idle. <code>auto.leader.rebalance.enable</code> (default true) corrects this periodically, and <code>kafka-leader-election.sh --election-type preferred</code> forces it now.</p>
+    <p>An unbalanced cluster is a throughput and latency problem long before it is an availability one, which is why it is easy to miss — nothing is broken, the cluster is just quietly using a third of itself.</p>
+
+    <h4>Check yourself</h4>
+    <p>You have run a rolling restart across all three brokers. Nothing failed, every partition is fully replicated. Why might p99 produce latency still be worse afterwards than before, and what one command would you run?</p>
+  </div>
+
+  <h2>Not in this lab: unclean leader election</h2>
+  <p>Demonstrating it means destroying data in a way that is fiddly to stage and teaches nothing you cannot reason out. The scenario: every in-sync replica is gone and only a stale replica remains. With <code>unclean.leader.election.enable=false</code> (the default, and set explicitly in this compose file) the partition goes offline and stays offline until an in-sync replica returns — no acknowledged write is lost, and availability is gone for as long as that takes. With <code>true</code>, the stale replica is promoted immediately, writes resume, and every record beyond its log end offset is permanently gone; consumers that already read them see the log move backwards.</p>
+  <p>Confirm what your cluster would do:</p>
+<pre>docker exec lab03-kafka1 /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --describe --entity-type brokers --entity-name 1 --all | grep unclean</pre>
+  <p>The interview answer is per topic class, not a preference: clickstream and metrics where a gap is survivable and downtime is not — enable it; a payment ledger or anything another system reconciles against — never, take the outage. The dimension is whether a downstream consumer treats the log as a source of truth.</p>
+
+  <h2>Tear down</h2>
+<pre>docker compose down -v</pre>
+
+  <h2>When something goes wrong</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+    <tbody>
+      <tr><td>Brokers will not start, port already in use</td><td>Lab 01 is still running. <code>cd ../lab01 &amp;&amp; docker compose down</code>.</td></tr>
+      <tr><td>Step 2 shows the record readable immediately</td><td>The paused container was the leader, not a follower. Check terminal A for which broker leads p0 and pause a different one.</td></tr>
+      <tr><td><code>01_produce_acks.py all</code> hangs instead of failing</td><td>A leader election is in progress. It resolves within <code>delivery.timeout.ms</code> (10s here) and reports.</td></tr>
+      <tr><td>ISR never returns after <code>docker start</code></td><td>Give it up to a minute; the broker has to load its log and catch up. If it stays out, check <code>docker logs lab03-kafka3 | tail -50</code>.</td></tr>
+      <tr><td>Everything fails after stopping two brokers</td><td>Expected if one of them held the only remaining in-sync replica — that is step 4's point. Start one back.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Done when</h2>
+  <p>You can answer these without looking anything up: why a consumer cannot read past the high watermark; what put the record in step 2 out of reach for thirty seconds; why <code>acks=all</code> alone guarantees nothing; which of the two commands in steps 4 and 5 represents the dangerous outcome and why; and what you would say to someone proposing <code>min.insync.replicas=3</code> on an RF-3 topic.</p>

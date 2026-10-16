@@ -292,3 +292,102 @@ When the connection is encrypted. TLS has to encrypt the bytes, which means pull
 Two arguments, and the second is the stronger one. **Cost:** long retention stops dictating broker disk size — keeping a year of history becomes an object-storage bill instead of a cluster-sizing problem. **Recovery time:** replacing a broker previously meant replicating every byte it held, so rebuild time scaled with retention; with most history remote a new broker pulls only the local window, dropping rebuild from hours to minutes. That also removes a hidden constraint where long retention made clusters slow to heal and therefore riskier to operate. The costs: a read-latency cliff for consumers that fall behind into remote segments, a second storage system in the failure and security surface, and no support for compacted topics. The honest framing is that tiered storage decouples retention from cluster size — if retention is not the thing sizing your cluster, it buys you little.
 
 </details>
+
+
+## M3 · Replication & ISR
+
+### Junior
+
+**M3.1** — What is the ISR, and what puts a replica in or out of it?
+
+<details>
+<summary>Answer</summary>
+
+The in-sync replica set: the replicas currently keeping up with the leader. A follower stays in while it has fetched up to the leader's log end offset within `replica.lag.time.max.ms` (default 30s). A GC pause, slow disk, saturated network or restart pushes it out; catching up puts it back. It is not the same as the replica list, and it changes continuously — almost every durability question reduces to how large the ISR was at the moment of failure.
+
+</details>
+
+**M3.2** — What do acks=0, acks=1 and acks=all mean?
+
+<details>
+<summary>Answer</summary>
+
+`acks=0`: the producer does not wait at all, so a network blip loses records with no retry possible. `acks=1`: the leader responds once it has written to its own log, so a leader failure before replication loses an acknowledged write silently. `acks=all`: the leader responds once every replica **in the ISR** has the record. Since Kafka 3.0 the producer defaults are `acks=all` and `enable.idempotence=true` (KIP-679) — older material saying the default is `acks=1` is out of date.
+
+</details>
+
+**M3.3** — What does replication.factor=3 actually give you?
+
+<details>
+<summary>Answer</summary>
+
+Three copies of each partition on three brokers: one leader serving all reads and writes, two followers fetching from it. It lets the cluster lose one broker and still have a choice of in-sync replica to promote. It does not by itself guarantee no data loss — that depends on `acks` and `min.insync.replicas`, since a replica that exists but has fallen out of the ISR protects nothing.
+
+</details>
+
+### Mid
+
+**M3.4** — What is the high watermark, and why can't a consumer read past it?
+
+<details>
+<summary>Answer</summary>
+
+The high watermark is the minimum log end offset across all in-sync replicas — the furthest point consumers may read. A record that exists only on the leader is not durable yet: if the leader dies, a follower that never received it becomes leader and the record is gone. Serving it would let a consumer read something that later ceases to exist, making the log appear to go backwards. Holding reads at the HW means anything visible has reached every in-sync replica. The cost is latency: a record becomes readable one replication round-trip after it is produced.
+
+</details>
+
+**M3.5** — Why does acks=all on its own not guarantee durability?
+
+<details>
+<summary>Answer</summary>
+
+Because it means all replicas *in the ISR*, not all replicas. If the followers fall behind and drop out, the ISR is just the leader, and `acks=all` is satisfied by the leader alone — it has silently degraded to `acks=1`, with no error, at exactly the moment the cluster is least healthy. `min.insync.replicas=2` closes this: the write is rejected with `NOT_ENOUGH_REPLICAS` rather than being accepted under-replicated. The pair is the configuration; either one alone is not.
+
+</details>
+
+**M3.6** — Reading `Replicas: 2,3,1 · Isr: 2,3` with min.insync.replicas=2 — what is the operational situation?
+
+<details>
+<summary>Answer</summary>
+
+Broker 1 has fallen more than `replica.lag.time.max.ms` behind and been removed from the ISR, so the partition is under-replicated. Writes still succeed, because the ISR size equals `min.insync.replicas` — but there is no margin left: one more failure and `acks=all` producers start getting `NOT_ENOUGH_REPLICAS`. Broker 2 is first in the replica list, so it is the preferred leader and currently holds leadership. This is the state `UnderReplicatedPartitions` is non-zero for, and it is a warning rather than an outage.
+
+</details>
+
+### Senior
+
+**M3.7** — Walk through the configurations under which Kafka can lose an acknowledged write, and say which one Kafka's design actually intends.
+
+<details>
+<summary>Answer</summary>
+
+**acks=1** — the leader acknowledges before replicating; it dies, a follower is promoted, the record is gone and the producer was told it succeeded. **acks=all with min.insync.replicas=1** — the ISR shrinks to the leader alone and `acks=all` silently becomes `acks=1`, so the same loss happens with a configuration that looks safe. **Unclean leader election enabled** — the whole ISR is lost, an out-of-sync replica is promoted, and every record beyond its log end offset is gone permanently; consumers that already read them see the log move backwards. **Correlated power loss across the ISR** — Kafka does not fsync per record, so durability is replication rather than flushing; if every replica is in one rack or availability zone and loses power together, acknowledged data can go. That is what `broker.rack` and rack-aware placement exist for. The intended configuration is RF 3, `min.insync.replicas=2`, `acks=all`, unclean election off, replicas spread across racks — and what it says is that **Kafka's durability story is to refuse writes rather than lose them**. Every setting above either upholds that or deliberately opts out.
+
+</details>
+
+**M3.8** — A partition's whole ISR is gone and only an out-of-sync replica survives. Walk the decision.
+
+<details>
+<summary>Answer</summary>
+
+The choice is between the partition staying offline until an in-sync replica returns (`unclean.leader.election.enable=false`, the default) and promoting the stale replica immediately (`true`). Offline means no acknowledged write is lost but the partition may be unavailable for a long time — possibly until a specific dead broker is recovered. Promoting means writes resume instantly and every record the old leader held beyond the stale replica's log end offset is permanently gone, with consumers that already read them seeing the log go backwards. There is no third option and no setting that avoids the trade. The senior answer is per topic class, not a preference: clickstream, metrics and logs where a gap is survivable and downtime is not — enable it; a payment ledger or anything another system reconciles against — never, take the outage and escalate. Saying "it depends" without naming the dimension is not an answer; the dimension is whether a downstream consumer treats the log as a source of truth.
+
+</details>
+
+**M3.9** — Why was leader epoch introduced, and what was broken before it?
+
+<details>
+<summary>Answer</summary>
+
+When a failed replica rejoins it may hold records the new leader never had, so it must truncate before following — the question is to what offset. Originally it truncated to its own high watermark, but the HW propagates to followers one round-trip after it advances, so during a double failure two replicas could disagree about it: committed records could be lost, or the two logs could silently diverge while both believed they were in sync. Leader epoch (KIP-101, Kafka 0.11) replaced the guess with a fact: every leader election increments an epoch, each replica keeps a `leader-epoch-checkpoint` mapping epochs to the offsets they began at, and a recovering follower asks the leader where epoch N ended and truncates to exactly that offset. It is not configurable. It is worth knowing because it is the honest answer to whether Kafka has ever lost data in normal operation — it has, before 0.11, through exactly this path.
+
+</details>
+
+**M3.10** — A pager fires: UnderMinIsrPartitionCount is 4 and producers are erroring. Diagnose it.
+
+<details>
+<summary>Answer</summary>
+
+`UnderMinIsrPartitionCount > 0` means the ISR has fallen below `min.insync.replicas` on those partitions, so `acks=all` producers are being rejected with `NOT_ENOUGH_REPLICAS` right now — the cluster is working as designed, refusing writes rather than losing them. First establish whether brokers are down (`OfflinePartitionsCount`, broker liveness) or whether brokers are alive but lagging, which `IsrShrinksPerSec` distinguishes. Alive-but-lagging points at the follower fetch loop: GC pauses, a saturated network link, a disk that has slowed, or a single broker holding too many leaders after an earlier failover. Mitigate by restoring replicas, not by lowering `min.insync.replicas` — that converts a loud failure into a silent one and is the wrong instinct under pressure. Afterwards, check leadership distribution, because leaders concentrate on whichever brokers recovered first; `auto.leader.rebalance.enable` handles it eventually, and `kafka-leader-election.sh --election-type preferred` forces it. The thing to say out loud: rejected writes are the system doing its job, and the incident is the under-replication, not the errors.
+
+</details>

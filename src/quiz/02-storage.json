@@ -6,37 +6,37 @@
   "questions": [
     {
       "level": "Junior",
-      "done": false,
+      "done": true,
       "q": "What files make up one partition on disk, and what is each for?",
       "a": "A directory named `<topic>-<partition>`, holding segments. Each segment is three files sharing a base-offset name: `.log` with the record batches, `.index` mapping offsets to byte positions, and `.timeindex` mapping timestamps to offsets. The filename is the offset the segment starts at, zero-padded, which is how the broker picks the right segment by binary-searching filenames before opening anything."
     },
     {
       "level": "Junior",
-      "done": false,
+      "done": true,
       "q": "What is the active segment, and what makes the broker roll to a new one?",
       "a": "The newest segment — the only one open for writing. It rolls when either `segment.bytes` (default 1 GiB) or `segment.ms` (default 7 days) is reached. The active segment is never deleted by retention and never compacted, which is why both limits matter operationally and not just as trivia."
     },
     {
       "level": "Junior",
-      "done": false,
+      "done": true,
       "q": "What deletes data from a Kafka topic?",
       "a": "Retention policy, never consumption. `retention.ms` deletes segments older than an age; `retention.bytes` caps bytes per partition and drops the oldest first. With `cleanup.policy=compact` the question changes from age to key: the cleaner keeps only the newest record per key. In every case deletion happens at segment granularity, not per record."
     },
     {
       "level": "Mid",
-      "done": false,
+      "done": true,
       "q": "Why is the offset index sparse rather than one entry per record?",
       "a": "One entry roughly every `log.index.interval.bytes` (4 KiB) instead of per record. A dense index would cost memory proportional to record count, and these files are memory-mapped, so it would compete for exactly the page-cache memory that makes reads fast. Sparse lookup plus a short forward scan in the `.log` is the better trade — which is why the final step of resolving an offset is a scan, not a direct hit."
     },
     {
       "level": "Mid",
-      "done": false,
+      "done": true,
       "q": "You set retention.ms=60000 on a low-traffic topic and nothing is deleted. Why?",
       "a": "Deletion works at segment granularity and never touches the active segment. On a low-traffic topic the active segment has not rolled, because rolling needs `segment.bytes` (1 GiB) or `segment.ms` (7 days) — so every record is eligible and none can be removed, since they share a file with records that are not. The fix is to lower `segment.ms` so segments close. Retention is a floor on data lifetime, never a ceiling: the real guarantee is at least `retention.ms`, plus up to one segment's worth of time, plus up to one `log.retention.check.interval.ms`."
     },
     {
       "level": "Mid",
-      "done": false,
+      "done": true,
       "q": "What is a tombstone, and how long does it live?",
       "a": "A record with a null value on a compacted topic. It marks the key as deleted; the cleaner removes both the tombstone and every earlier record for that key. It survives for `delete.retention.ms` (default 24 hours) after the key becomes cleanable, so that consumers have a window to observe the deletion — a consumer offline longer than that can miss the delete entirely and keep a stale value, which is a real correctness bug in CDC and cache-invalidation pipelines."
     },
