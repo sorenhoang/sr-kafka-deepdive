@@ -45,7 +45,8 @@
   <div class="callout">
     <span class="tag">The senior follow-up</span>
     <p><strong>When does Kafka <em>not</em> get zero-copy?</strong> When the connection is encrypted. TLS has to encrypt the bytes, which means pulling them into user space — so <code>sendfile</code> is off and throughput drops measurably. That is a real capacity-planning input, not trivia, and it is the question an interviewer asks after you say "zero-copy".</p>
-    <p>Historically there was a second case: serving an old client that needed an older message format forced the broker to down-convert, losing zero-copy and spiking broker CPU. Kafka 4.0 removed message formats v0 and v1 (KIP-724) along with <code>message.format.version</code>, so on a 4.x broker that case is gone — worth saying, because it shows you know what changed and when.</p>
+    <p>A second case is broker-side <strong>recompression</strong>: if a topic sets a <code>compression.type</code> different from what the producer sent, the broker has to decompress and recompress each batch, touching the bytes. Leaving the topic at <code>compression.type=producer</code> is what keeps the broker out of the data path.</p>
+    <p>Historically there was a third case: serving an old client that needed an older message format forced the broker to down-convert, losing zero-copy and spiking broker CPU. Kafka 4.0 removed message formats v0 and v1 (KIP-724) along with <code>message.format.version</code>, so on a 4.x broker that case is gone — worth saying, because it shows you know what changed and when.</p>
   </div>
 
   <h3>4 · Batching, which is what ties the other three together</h3>

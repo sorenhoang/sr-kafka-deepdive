@@ -193,6 +193,7 @@ pre .c{color:var(--muted)}
     <a class="wip" href="#m2"><span class="n">M2</span><span>Storage internals</span></a>
     <a class="wip" href="lab-02-storage.html"><span class="n">↳</span><span>Lab 02 worksheet</span></a>
     <a class="wip" href="#q-m2"><span class="n">↳</span><span>Questions</span></a>
+    <a class="done" href="#a-m2"><span class="n">↳</span><span>Model answers</span></a>
   </nav>
 
   <h3>Not started</h3>
@@ -531,7 +532,8 @@ pip install -r requirements.txt &amp;&amp; cd scripts</pre>
   <div class="callout">
     <span class="tag">The senior follow-up</span>
     <p><strong>When does Kafka <em>not</em> get zero-copy?</strong> When the connection is encrypted. TLS has to encrypt the bytes, which means pulling them into user space — so <code>sendfile</code> is off and throughput drops measurably. That is a real capacity-planning input, not trivia, and it is the question an interviewer asks after you say "zero-copy".</p>
-    <p>Historically there was a second case: serving an old client that needed an older message format forced the broker to down-convert, losing zero-copy and spiking broker CPU. Kafka 4.0 removed message formats v0 and v1 (KIP-724) along with <code>message.format.version</code>, so on a 4.x broker that case is gone — worth saying, because it shows you know what changed and when.</p>
+    <p>A second case is broker-side <strong>recompression</strong>: if a topic sets a <code>compression.type</code> different from what the producer sent, the broker has to decompress and recompress each batch, touching the bytes. Leaving the topic at <code>compression.type=producer</code> is what keeps the broker out of the data path.</p>
+    <p>Historically there was a third case: serving an old client that needed an older message format forced the broker to down-convert, losing zero-copy and spiking broker CPU. Kafka 4.0 removed message formats v0 and v1 (KIP-724) along with <code>message.format.version</code>, so on a 4.x broker that case is gone — worth saying, because it shows you know what changed and when.</p>
   </div>
 
   <h3>4 · Batching, which is what ties the other three together</h3>
@@ -607,12 +609,12 @@ pip install -r requirements.txt &amp;&amp; cd scripts</pre>
     <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Why is the offset index sparse rather than one entry per record?</span></label></li>
     <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>You set retention.ms=60000 on a low-traffic topic and nothing is deleted. Why?</span></label></li>
     <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>What is a tombstone, and how long does it live?</span></label></li>
-    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Explain why Kafka is fast as four distinct mechanisms, and say how the fourth makes the third possible.</span></label></li>
-    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>When does Kafka not get zero-copy, and what does it cost?</span></label></li>
+    <li><label><input type="checkbox" data-q="7" checked><span class="qtext"><span class="lvl hard">Senior · write it out</span>Explain why Kafka is fast as four distinct mechanisms, and say how the fourth makes the third possible.</span></label></li>
+    <li><label><input type="checkbox" data-q="8" checked><span class="qtext"><span class="lvl hard">Senior · write it out</span>When does Kafka not get zero-copy, and what does it cost?</span></label></li>
     <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A compacted topic feeds a cache. What correctness problems does compaction introduce that a consumer author must handle?</span></label></li>
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Make the case for tiered storage, and say what it costs.</span></label></li>
   </ul>
-  <p class="qmeta" data-count-for="m2-questions">0 / 10</p>
+  <p class="qmeta" data-count-for="m2-questions">2 / 10</p>
 
 
   <h2 id="a-m0">Model answers — module 0</h2>
@@ -705,6 +707,56 @@ pip install -r requirements.txt &amp;&amp; cd scripts</pre>
   <p><strong>4 · Batching, and the format that makes the other three work.</strong> Records travel and are stored as compressed batches, and — this is the part that ties it together — the on-disk format is byte-identical to the wire format the producer sent and the consumer expects. So the broker does no per-record work at all: no parsing, no re-framing, no per-message bookkeeping. That identity is what makes zero-copy possible in the first place; if the broker had to transform anything, it would have to touch the bytes.</p>
 
   <p>The through-line worth stating: Kafka is fast not because any one trick is clever, but because the broker was given almost nothing to do. Every one of these follows from refusing to keep per-message state.</p>
+
+  <h2 id="a-m2">Model answers — module 2</h2>
+
+  <h3>Q7 · Four mechanisms, and how the fourth makes the third possible</h3>
+  <p>There is more than one defensible decomposition here. What the question is testing is whether the mechanisms are understood as connected rather than as a list, so the fourth one has to be the one that explains the third.</p>
+
+  <p><strong>1 · Sequential I/O.</strong> A partition is append-only, so writes land at the end of a file and never seek. Sequential throughput beats random access by roughly an order of magnitude on spinning disks and still substantially on NVMe. Segmenting and the sparse <code>.index</code> keep the read path sequential too: an offset resolves to a byte position by binary-searching segment filenames and then one index lookup, so a read is a seek followed by a sequential scan rather than a walk. The index is deliberately sparse — one entry per ~4 KiB — because these files are memory-mapped and a dense index would compete for the page-cache memory that makes reads fast in the first place.</p>
+
+  <p><strong>2 · Page cache instead of an application cache.</strong> Kafka keeps no data in the JVM heap. Writes go to the OS page cache and are not fsynced per record; durability comes from replication to other brokers rather than from reaching the platter. Three consequences: a broker <em>process</em> crash loses nothing because the cache belongs to the kernel, while a <em>machine</em> power loss can lose unflushed data on that broker — which is why durability is <code>acks=all</code> plus <code>min.insync.replicas</code>; the heap stays small, so a broker serving terabytes runs on a few gigabytes with GC off the request path; and a consumer reading recent data usually never touches a disk.</p>
+
+  <p><strong>3 · Zero-copy on the read path.</strong> A conventional <code>read()</code> then <code>write()</code> costs four copies — DMA disk to kernel buffer, CPU kernel to user space, CPU user space to socket buffer, DMA socket buffer to NIC — across two syscalls, so four context switches. <code>sendfile</code> collapses this to two copies and two context switches, and with scatter-gather DMA the second copy disappears as well: the NIC reads straight from the page cache. The broker never deserialises a record on a fetch.</p>
+
+  <p><strong>4 · Batching, and the format identity that makes zero-copy possible at all.</strong> Records are stored and shipped as compressed batches, and the on-disk format is <strong>byte-identical to the wire format</strong> the producer sent and the consumer expects. So the broker does no per-record work: no parsing, no re-framing, no per-message bookkeeping. That identity is the precondition for mechanism 3 — <code>sendfile</code> can only hand raw file bytes to a socket, so the moment the broker has to transform anything, it must pull the bytes into user space and zero-copy is gone. Batching also makes compression effective, because 500 similar records in one batch compress far better than 500 compressed individually, which is why <code>linger.ms</code> affects the storage bill and not only latency.</p>
+
+  <p><strong>The through-line.</strong> Kafka is fast not because any one trick is clever but because the broker was given almost nothing to do, and every mechanism above follows from one decision: refusing to keep per-message state. That is the same refusal that costs you per-message retry, delay and priority.</p>
+
+  <h3>Q8 · When Kafka does not get zero-copy, and what it costs</h3>
+
+  <p><strong>TLS.</strong> An encrypted connection has to encrypt the bytes, which means pulling them out of the page cache into user space — so <code>sendfile</code> cannot be used and the read path falls back to copy, encrypt, write. The cost is measurable: higher broker CPU, allocation and GC pressure that the zero-copy path avoids entirely, and the extra context switches back. The operational conclusion is what matters in an interview: <strong>an encrypted cluster is not a drop-in swap for a plaintext one</strong>, and the difference belongs in capacity planning rather than being discovered after the migration.</p>
+
+  <p><strong>Broker-side recompression.</strong> If a topic sets a <code>compression.type</code> that differs from what the producer sent, the broker has to decompress and recompress each batch — touching the bytes, so no zero-copy, plus real CPU on the write path. Leaving the topic at <code>compression.type=producer</code> is what keeps the broker out of the data path.</p>
+
+  <p><strong>Down-conversion — historical, and worth saying so.</strong> A client requesting an older message format used to force the broker to rewrite batches, losing zero-copy and spiking CPU, sometimes badly enough to take a cluster down during a slow client migration. Kafka 4.0 removed message formats v0 and v1 (KIP-724) along with <code>message.format.version</code>, so on a 4.x broker this case no longer exists. Naming it <em>and</em> naming when it disappeared shows you track what changed rather than reciting an old blog post.</p>
+
+  <p>One thing that is <em>not</em> a loss of zero-copy, and is worth not confusing: a consumer reading data old enough to have been evicted from the page cache still uses <code>sendfile</code>. It just pays a disk read first. The path is unchanged; only the latency is.</p>
+
+  <h3>Q9 · A compacted topic feeding a cache: what breaks</h3>
+  <p>Compaction converges a log towards a table — replay it and you end with the current value per key. Four consequences follow, and all of them are the consumer author's problem.</p>
+
+  <p><strong>Offsets have gaps.</strong> Compaction removes superseded records but never renumbers the survivors, because consumers have already committed against those offsets. A compacted log therefore reads 8, 10, 11, 15. Any logic that assumes <code>offset + 1</code>, infers progress by counting records, or treats a gap as data loss is wrong. Lag is still meaningful; record counts are not.</p>
+
+  <p><strong>Intermediate values are gone.</strong> A consumer starting from the tail sees only the latest value per key, so a compacted topic cannot be used to reconstruct a history or to react to every transition — only a consumer keeping up near the head sees them all. If the cache needs to act on <em>changes</em> rather than hold <em>state</em>, a compacted topic is the wrong source, and the right answer is a separate non-compacted event topic.</p>
+
+  <p><strong>Tombstones expire, and this is the real bug.</strong> A delete is a record with a null value. It survives <code>delete.retention.ms</code> (default 24 h) and is then removed along with the key. A consumer offline longer than that window comes back, sees no tombstone and no record for the key, and keeps its stale entry <em>forever</em> — a silent, permanent divergence with no error anywhere. This is the failure that bites CDC pipelines and cache invalidation in production. Mitigations, in order of honesty: raise <code>delete.retention.ms</code> past the longest plausible outage; alert on consumer downtime approaching it; and, as the thing that actually works, rebuild the cache periodically from a full read of the compacted log instead of trusting incrementally maintained state.</p>
+
+  <p><strong>The active segment is never compacted.</strong> The head of the log always holds uncompacted duplicates, so the same key arrives repeatedly and handlers must be idempotent. Compaction is eventual: it is a property of old data, not a guarantee about what any given read returns.</p>
+
+  <p>Two supporting details worth having ready: a null key is rejected on a compacted topic, because there is nothing to compact on; and <code>cleanup.policy=compact,delete</code> applies both policies, which is how you stop an unbounded keyspace from growing forever.</p>
+
+  <h3>Q10 · The case for tiered storage, and what it costs</h3>
+
+  <p><strong>What it does.</strong> With <code>remote.storage.enable=true</code>, a topic keeps recent closed segments on local disk (<code>local.retention.ms</code> / <code>local.retention.bytes</code>) and moves older ones to object storage, while <code>retention.ms</code> continues to govern total lifetime. Consumers read through transparently and the offset space is unchanged.</p>
+
+  <p><strong>The cost argument.</strong> Long retention stops dictating broker disk size. Keeping a year of history becomes an object-storage bill instead of a cluster-sizing problem, and the cluster can be sized for throughput rather than for history.</p>
+
+  <p><strong>The recovery argument, which is the stronger one.</strong> Replacing a broker used to mean replicating every byte it held, so rebuild time scaled with retention — a cluster holding 30 days took far longer to heal than one holding 3. With most history remote, a new broker pulls only the local window, dropping rebuild from hours to minutes. That removes a hidden constraint most teams never name out loud: long retention made clusters slow to heal and therefore riskier to operate, so retention was quietly capped by operational fear rather than by requirements. Tiered storage removes the coupling, and saying that is what separates this answer from a summary of the feature page.</p>
+
+  <p><strong>What it costs.</strong> A latency cliff for any consumer that falls behind into remote segments — fine for a backfill, bad for a consumer you expected to stay near the head, and worth a separate alert. A second storage system inside the failure and security surface: its availability becomes the cluster's availability for historical reads, and its access control becomes part of the data's access control. And it does not apply to compacted topics.</p>
+
+  <p><strong>How to decide.</strong> Tiered storage decouples retention from cluster size. So the question to ask first is whether retention is the thing sizing the cluster today. If the cluster is sized by throughput or partition count instead, tiered storage buys little and adds a dependency — and the honest recommendation is to leave it off.</p>
 </main>
 </div>
 

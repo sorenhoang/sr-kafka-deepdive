@@ -42,13 +42,13 @@
     },
     {
       "level": "Senior",
-      "done": false,
+      "done": true,
       "q": "Explain why Kafka is fast as four distinct mechanisms, and say how the fourth makes the third possible.",
       "a": "**Sequential I/O** — appends are sequential and the index files keep reads sequential too, resolving an offset to a byte position rather than walking the log. **Page cache** — writes are not fsynced per record; durability comes from replication, so a broker process crash loses nothing (the cache is the kernel's), and the JVM heap stays small, keeping GC out of the request path. **Zero-copy** — recent data is already in page cache in the format the consumer expects, so `sendfile` moves it straight to the socket with no user-space copy and no deserialisation. **Batching** — records are stored and shipped as compressed batches in a format byte-identical to the wire format, so the broker does no per-record work at all. That identity is what makes zero-copy possible: any parsing or re-framing would force the broker to touch the bytes. The through-line is that Kafka is fast because the broker was given almost nothing to do, and all four follow from refusing to keep per-message state."
     },
     {
       "level": "Senior",
-      "done": false,
+      "done": true,
       "q": "When does Kafka not get zero-copy, and what does it cost?",
       "a": "When the connection is encrypted. TLS has to encrypt the bytes, which means pulling them into user space, so `sendfile` cannot be used and both throughput and broker CPU degrade measurably — a capacity-planning input rather than trivia, and the reason an encrypted cluster is not a drop-in swap for a plaintext one. Historically there was a second case: a client requesting an older message format forced the broker to down-convert, losing zero-copy and spiking CPU. Kafka 4.0 removed message formats v0 and v1 (KIP-724) along with `message.format.version`, so on a 4.x broker that case no longer exists."
     },
