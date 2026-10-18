@@ -1,0 +1,83 @@
+  <p class="eyebrow">Module 4</p>
+  <h1>KRaft &amp; the metadata plane</h1>
+  <p class="lede">Everything so far has been the data plane. This is the other half: how the cluster knows who leads which partition, and why Kafka spent five years replacing the system that used to answer that.</p>
+
+  <h2 id="m4">What ZooKeeper was actually doing</h2>
+  <p>Before 4.0, a Kafka cluster was two distributed systems. ZooKeeper held the <strong>metadata</strong>: which brokers are alive, which topics exist, how partitions are assigned, who leads each one, the ISR, topic configs and ACLs. One broker was elected <strong>controller</strong> and was the only component allowed to write that metadata; everyone else read it.</p>
+  <p>The data plane never touched ZooKeeper — producing and consuming went broker to broker. ZooKeeper was the control plane only, which is why clusters could be enormous and still keep a modest ZooKeeper ensemble.</p>
+
+  <h3>Why it had to go</h3>
+  <ul>
+    <li><strong>Two systems to operate.</strong> Two sets of config, two security models, two upgrade paths, two sets of failure modes, two on-call runbooks — for one product. Most Kafka outages that were not disk-related were ZooKeeper-related.</li>
+    <li><strong>Controller failover was O(partitions).</strong> A new controller had to <em>load the entire cluster state out of ZooKeeper</em> before it could act. On a large cluster that was minutes of no leader elections, no topic changes, and no recovery from any other failure happening at the same time. Failover time grew with the thing you most wanted to grow.</li>
+    <li><strong>Metadata propagation was RPC push.</strong> The controller pushed updates to brokers individually. A broker that missed one had no way to notice: there was no version, no offset, nothing to compare. Divergence was possible and hard to detect.</li>
+    <li><strong>A hard ceiling on partitions.</strong> Roughly 200k per cluster in practice, set by that load-everything failover, not by disk or throughput.</li>
+  </ul>
+
+  <h2>KRaft: metadata as a Kafka log</h2>
+  <p>The insight behind KIP-500 is almost circular, and it is the thing to lead with in an interview: <strong>Kafka is a replicated log, and metadata is a thing that needs replicating — so store the metadata in a Kafka log.</strong></p>
+  <p>A set of <strong>controller</strong> nodes forms a Raft quorum over a single-partition internal topic, <code>__cluster_metadata</code>. The Raft leader is the <strong>active controller</strong>; the others are followers that already hold the whole log.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>ZooKeeper era</th><th>KRaft</th></tr></thead>
+    <tbody>
+      <tr><td>Where metadata lives</td><td>ZooKeeper znodes</td><td><code>__cluster_metadata</code>, a Kafka log</td></tr>
+      <tr><td>How it replicates</td><td>ZAB, inside ZooKeeper</td><td>Raft, inside Kafka</td></tr>
+      <tr><td>How brokers learn</td><td>Controller pushes by RPC</td><td>Brokers <strong>fetch the log</strong>, like consumers</td></tr>
+      <tr><td>Controller failover</td><td>Load all state from ZK — O(partitions)</td><td>Standby already has it in memory — near-instant</td></tr>
+      <tr><td>Can a broker tell it is behind?</td><td>No</td><td>Yes — it has an offset and a lag</td></tr>
+      <tr><td>Processes to operate</td><td>Kafka + ZooKeeper</td><td>Kafka</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Three consequences are worth being able to state in your own words:</p>
+  <ol>
+    <li><strong>Brokers are observers of the metadata log.</strong> They fetch records and apply them in order, exactly as a consumer does. Metadata becomes eventually consistent with a measurable lag rather than a push that might have been missed — and "this broker is 4,000 metadata records behind" is now a sentence you can say, and alert on.</li>
+    <li><strong>Failover is fast because nothing is loaded.</strong> Standby controllers have been applying the same log all along, so promotion is a Raft election, not a state transfer. Milliseconds instead of minutes, and it no longer scales with partition count.</li>
+    <li><strong>The metadata log is compacted, with snapshots.</strong> It would otherwise grow forever. Periodic snapshots capture the full state so the log can be truncated, and a new controller or a far-behind broker loads the latest snapshot and replays only what came after.</li>
+  </ol>
+
+  <h2>Deployment shapes and quorum sizing</h2>
+  <p>Every node declares <code>process.roles</code>:</p>
+  <ul>
+    <li><strong>Isolated</strong> — <code>controller</code> or <code>broker</code>, never both. Dedicated controllers are small, cheap, and insulated from data-plane load; a broker under GC pressure cannot destabilise the control plane. This is the production shape.</li>
+    <li><strong>Combined</strong> — <code>broker,controller</code> on one node. Fewer machines, fine for development and small clusters, and what every lab in this repo uses. The risk is exactly the one it saves money on: data-plane load can starve the controller.</li>
+  </ul>
+  <p>Quorum sizing follows Raft, not replication factor: a quorum of <em>N</em> tolerates <em>(N-1)/2</em> failures, so <strong>3 controllers tolerate one loss and 5 tolerate two</strong>. Even numbers buy nothing — 4 tolerates the same single failure as 3, while adding another node that must agree. Three is the normal answer; five is for clusters where controller loss is genuinely costly.</p>
+  <p>Controllers are sized by metadata volume, meaning partition count, not by throughput. This surprises people: a cluster pushing gigabytes a second can run a perfectly happy three-node controller quorum on small instances.</p>
+
+  <h2>What changed in day-to-day operation</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Then</th><th>Now</th></tr></thead>
+    <tbody>
+      <tr><td><code>--zookeeper host:2181</code></td><td><code>--bootstrap-server</code>, or <code>--bootstrap-controller</code> for quorum-level commands</td></tr>
+      <tr><td>ZooKeeper four-letter words, <code>zkCli.sh</code></td><td><code>kafka-metadata-quorum.sh --describe --status</code> / <code>--replication</code></td></tr>
+      <tr><td>Browse znodes to inspect state</td><td><code>kafka-metadata-shell.sh</code>, or <code>kafka-dump-log.sh --cluster-metadata-decoder</code></td></tr>
+      <tr><td>ZooKeeper creates the cluster id</td><td><code>kafka-storage.sh format --cluster-id</code> before first start</td></tr>
+      <tr><td>Separate ZooKeeper ACLs</td><td>One security model</td></tr>
+    </tbody>
+  </table></div>
+  <p>Metrics worth knowing: <code>MetadataLag</code> per broker (how far behind the metadata log it is — the new divergence detector), <code>ActiveControllerCount</code> (must be exactly 1 across the cluster; 0 means no controller, 2 means split brain), and the quorum's own <code>CurrentLeader</code> and high watermark.</p>
+
+  <h2>Timeline, and why it matters for an interview</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Version</th><th>What happened</th></tr></thead>
+    <tbody>
+      <tr><td>2.8 (2021)</td><td>KRaft early access — not for production</td></tr>
+      <tr><td>3.3</td><td>KRaft marked production-ready for new clusters</td></tr>
+      <tr><td>3.5-3.9</td><td>Migration path from ZooKeeper; ZooKeeper deprecated</td></tr>
+      <tr><td><strong>4.0</strong> (2025)</td><td><strong>ZooKeeper removed entirely.</strong> KRaft only.</td></tr>
+    </tbody>
+  </table></div>
+  <p>The operational consequence people miss: because 4.0 removed ZooKeeper support outright, a cluster still on ZooKeeper <strong>cannot upgrade directly to 4.x</strong>. It has to go to a 3.x version first, migrate to KRaft there, and only then upgrade. That is a real migration-planning fact rather than trivia, and it is the kind of detail that separates "I read the release notes" from "I have had to plan this".</p>
+
+  <div class="callout">
+    <span class="tag">Answering "why did Kafka drop ZooKeeper?"</span>
+    <p>The weak answer is "to simplify operations" — true, and it sounds like a slide. The strong answer names the mechanism: <em>controller failover required loading the entire cluster state out of ZooKeeper, so recovery time scaled with partition count and capped cluster size. Putting metadata in a Raft-replicated Kafka log means standby controllers already hold the state, so failover becomes an election rather than a state transfer — and brokers consume metadata as a log with an offset, which makes "behind" a measurable quantity instead of an invisible one.</em> Operational simplicity is a consequence, not the reason.</p>
+  </div>
+
+  <h2 id="lab04">Lab 04</h2>
+  <p><strong><a href="lab-04-kraft.html">Open the step-by-step worksheet →</a></strong> — five steps: inspect the quorum, read your own topic creation back out of the metadata log as a record, kill the active controller and time the failover, watch brokers follow the metadata log by offset, and find the snapshot.</p>
+  <p>Step 2 is the one that makes the idea land: create a topic, then dump <code>__cluster_metadata</code> and find the <code>TopicRecord</code> and <code>PartitionRecord</code> your command produced. Metadata stops being an abstraction the moment you read it as log records.</p>
+
+  <!--QUIZ:04-kraft-->

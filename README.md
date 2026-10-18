@@ -35,13 +35,18 @@ M2 is complete: lab 02 run, junior and mid tiers self-assessed, Q7 and Q8 answer
 and graded. Q9 and Q10 were answered from the model rather than attempted cold —
 worth retrying in M13, alongside M0 Q9 and Q10.
 
+M3: lab 03 run. All ten questions were answered from the model rather than attempted,
+so `model` rather than a tick — the quiz entries stay unchecked on purpose, since the
+point of the tracker is to record what has been defended, not what has been read. That
+makes fourteen questions queued for a cold retry in M13.
+
 | Module | Topic | Material | Lab run | Questions graded |
 |---|---|:--:|:--:|:--:|
 | M0 | Positioning: log vs queue, when not to use Kafka, Share Groups | ready | ✅ | ✅ |
 | M1 | Topic, partition, offset, replica, consumer group, ordering | ready | ✅ | ✅ |
 | M2 | Storage internals: segments, page cache, zero-copy, compaction | ready | ✅ | ✅ |
-| M3 | Replication, ISR, LEO vs high watermark, unclean leader election | ready | | |
-| M4 | KRaft: quorum controller, metadata log | | | |
+| M3 | Replication, ISR, LEO vs high watermark, unclean leader election | ready | ✅ | model |
+| M4 | KRaft: quorum controller, metadata log | ready | | |
 | M5 | Producer internals, idempotent producer | | | |
 | M6 | Consumer internals, rebalance, KIP-848 | | | |
 | M7 | Delivery semantics, transactions, exactly-once | | | |
@@ -74,6 +79,7 @@ labs/lab01/          three-broker KRaft cluster + Python scripts
 labs/lab02-storage/  single broker; segments, indexes, retention, compaction
 labs/lab03-replication/
                      three brokers you break on purpose; ISR, high watermark, acks
+labs/lab04-kraft/    the metadata log, the controller quorum, controller failover
 private/             gitignored — raw answers, grades and gap notes, local only
 ```
 

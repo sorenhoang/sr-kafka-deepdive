@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>
+:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}
+img{max-width:100%}
+[hidden]:not([hidden="until-found"]){display:none!important}
+</style>
+<title>Kafka Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@500;700;900&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: sticky module rail on the left, single reading column ~68ch on the right; stacks to one column under 900px */
+:root{
+  --paper:#F2F3EF; --panel:#FBFBF9; --sunk:#E8EAE4;
+  --ink:#1A1D21; --ink-2:#3C434B; --muted:#6B737C;
+  --rule:#D5D8D1; --rule-strong:#B9BEB6;
+  --accent:#1D6B61; --accent-soft:#DCE9E6;
+  --warn:#9E4B18; --warn-soft:#F2E3D8;
+  --font-display:"Chivo","Helvetica Neue",Arial,sans-serif;
+  --font-body:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#15171A; --panel:#1C1F23; --sunk:#23272C;
+  --ink:#E9EBE6; --ink-2:#C3C9CE; --muted:#929AA2;
+  --rule:#2C3137; --rule-strong:#3D444B;
+  --accent:#58B6A7; --accent-soft:#1B312E;
+  --warn:#D98B52; --warn-soft:#33241A;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --paper:#15171A; --panel:#1C1F23; --sunk:#23272C;
+  --ink:#E9EBE6; --ink-2:#C3C9CE; --muted:#929AA2;
+  --rule:#2C3137; --rule-strong:#3D444B;
+  --accent:#58B6A7; --accent-soft:#1B312E;
+  --warn:#D98B52; --warn-soft:#33241A;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:17px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+.shell{display:grid; grid-template-columns:260px minmax(0,1fr); gap:0; max-width:1180px; margin:0 auto}
+
+.rail{
+  border-right:1px solid var(--rule);
+  padding:28px 20px 48px; align-self:start;
+  position:sticky; top:env(safe-area-inset-top,0px);
+  max-height:100vh; overflow-y:auto;
+}
+.brand{font-family:var(--font-display); font-weight:900; font-size:19px; letter-spacing:-.02em; line-height:1.15; margin:0 0 2px}
+.brand span{color:var(--accent)}
+.brand-sub{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:0 0 22px}
+.rail h3{font-family:var(--font-mono); font-size:10px; letter-spacing:.11em; text-transform:uppercase; color:var(--muted); margin:22px 0 8px; font-weight:600}
+.rail nav{display:flex; flex-direction:column; gap:1px}
+.rail nav a{
+  display:flex; gap:9px; align-items:baseline;
+  font-family:var(--font-display); font-size:13.5px; font-weight:500;
+  color:var(--ink-2); text-decoration:none; padding:5px 8px; border-radius:3px; min-width:0;
+}
+.rail nav a:hover{background:var(--sunk); color:var(--ink)}
+.rail nav a .n{font-family:var(--font-mono); font-size:10.5px; color:var(--muted); flex:0 0 22px; font-weight:500}
+.rail nav a.done .n{color:var(--accent)}
+.rail nav a.todo{color:var(--muted)}
+.rail nav a.todo .n{opacity:.6}
+.rail nav a.wip .n{color:var(--warn)}
+.legend i{color:var(--warn); font-style:normal}
+.legend{font-family:var(--font-mono); font-size:10px; color:var(--muted); margin-top:20px; line-height:1.9; border-top:1px solid var(--rule); padding-top:14px}
+.legend b{color:var(--accent); font-weight:500}
+.repo-link{font-family:var(--font-mono); font-size:10px; margin-top:12px}
+
+main{padding:40px 44px 96px; min-width:0}
+main.solo{max-width:900px; margin:0 auto; padding:40px 24px 96px}
+.eyebrow{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.11em; text-transform:uppercase; color:var(--accent); font-weight:600; margin:0 0 10px}
+h1{font-family:var(--font-display); font-weight:900; font-size:clamp(30px,4.6vw,44px); line-height:1.06; letter-spacing:-.025em; margin:0 0 14px; text-wrap:balance}
+.lede{font-size:19px; color:var(--ink-2); max-width:62ch; margin:0 0 8px}
+h2{font-family:var(--font-display); font-weight:700; font-size:25px; letter-spacing:-.015em; margin:56px 0 4px; padding-top:22px; border-top:2px solid var(--ink); text-wrap:balance}
+h3{font-family:var(--font-display); font-weight:700; font-size:18px; letter-spacing:-.01em; margin:34px 0 6px; text-wrap:balance}
+p{margin:10px 0; max-width:68ch}
+a{color:var(--accent)}
+code{font-family:var(--font-mono); font-size:.86em; background:var(--sunk); padding:1.5px 5px; border-radius:3px}
+strong{font-weight:600}
+ul,ol{max-width:68ch; padding-left:22px; margin:10px 0}
+li{margin:5px 0}
+hr{border:0; border-top:1px solid var(--rule); margin:40px 0}
+
+.scroll{overflow-x:auto; margin:18px 0; border:1px solid var(--rule); border-radius:5px; background:var(--panel)}
+table{border-collapse:collapse; width:100%; font-size:14.5px; font-family:var(--font-display)}
+th,td{text-align:left; padding:9px 13px; border-bottom:1px solid var(--rule); vertical-align:top}
+thead th{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); font-weight:600; background:var(--sunk); white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+td code{background:transparent; padding:0; color:var(--accent)}
+.num{font-variant-numeric:tabular-nums; font-family:var(--font-mono)}
+
+pre{
+  font-family:var(--font-mono); font-size:13px; line-height:1.62;
+  background:var(--panel); border:1px solid var(--rule); border-left:2px solid var(--accent);
+  border-radius:4px; padding:14px 16px; overflow-x:auto; margin:16px 0; color:var(--ink-2);
+}
+pre b{color:var(--ink); font-weight:600}
+pre .c{color:var(--muted)}
+
+.callout{border:1px solid var(--rule); border-left:3px solid var(--accent); background:var(--panel); border-radius:4px; padding:14px 18px; margin:20px 0}
+.callout.warn{border-left-color:var(--warn); background:var(--warn-soft)}
+.callout .tag{font-family:var(--font-mono); font-size:10px; letter-spacing:.09em; text-transform:uppercase; font-weight:600; color:var(--accent); display:block; margin-bottom:5px}
+.callout.warn .tag{color:var(--warn)}
+.callout p{margin:5px 0; max-width:62ch}
+.callout :first-child{margin-top:0} .callout :last-child{margin-bottom:0}
+
+.logstrip{display:flex; flex-direction:column; gap:7px; margin:20px 0; font-family:var(--font-mono); font-size:11.5px}
+.logrow{display:flex; align-items:center; gap:9px; min-width:0}
+.logrow .plabel{flex:0 0 72px; color:var(--muted); letter-spacing:.04em}
+.cells{display:flex; gap:3px; flex-wrap:wrap; min-width:0}
+.cell{width:30px; height:26px; display:grid; place-items:center; background:var(--sunk); border:1px solid var(--rule); border-radius:2px; color:var(--ink-2); font-size:10.5px; font-variant-numeric:tabular-nums}
+.cell.hw{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600}
+.cell.empty{background:transparent; border-style:dashed; color:transparent}
+.logrow .owner{flex:0 0 auto; color:var(--accent); font-size:10.5px; letter-spacing:.04em}
+.logrow .owner.idle{color:var(--warn)}
+
+.tool{border:1px solid var(--rule-strong); border-radius:6px; background:var(--panel); padding:20px; margin:24px 0}
+.tool-head{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); font-weight:600; margin-bottom:14px}
+.fields{display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end}
+.field{display:flex; flex-direction:column; gap:5px; min-width:0}
+.field label{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted)}
+.field input{
+  font-family:var(--font-mono); font-size:14px; padding:7px 10px; width:150px; max-width:100%;
+  background:var(--paper); color:var(--ink); border:1px solid var(--rule-strong); border-radius:3px;
+}
+.field input:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+.field input[type=number]{width:90px}
+.result{margin-top:18px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; font-family:var(--font-mono); font-size:13px}
+.chip{border:1px solid var(--rule-strong); border-radius:3px; padding:6px 11px; background:var(--paper); font-variant-numeric:tabular-nums}
+.chip b{color:var(--accent); font-weight:600}
+.verdict{font-family:var(--font-display); font-size:14px; font-weight:500; margin-top:12px}
+.verdict.moved{color:var(--warn)}
+.verdict.kept{color:var(--accent)}
+
+.qlist{list-style:none; padding:0; margin:18px 0; max-width:none}
+.qlist li{border:1px solid var(--rule); border-radius:5px; background:var(--panel); margin:7px 0; padding:0}
+.qlist label{display:flex; gap:12px; align-items:flex-start; padding:12px 15px; cursor:pointer}
+.qlist input{margin:4px 0 0; accent-color:var(--accent); flex:0 0 auto; width:15px; height:15px}
+.qlist .qtext{font-size:15.5px; min-width:0}
+.qlist .lvl{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); display:block; margin-bottom:3px}
+.qlist .lvl.hard{color:var(--warn)}
+.qlist input:checked + .qtext{color:var(--muted); text-decoration:line-through var(--rule-strong)}
+.qmeta{font-family:var(--font-mono); font-size:11px; color:var(--muted); margin-top:10px}
+
+/* lab worksheet */
+.step{border:1px solid var(--rule); border-radius:6px; background:var(--panel); padding:0 22px 18px; margin:26px 0}
+.step > h3{display:flex; gap:12px; align-items:baseline; margin:0 -22px 4px; padding:14px 22px; border-bottom:1px solid var(--rule); background:var(--sunk); border-radius:5px 5px 0 0}
+.step > h3 .sn{font-family:var(--font-mono); font-size:11px; color:var(--accent); flex:0 0 auto; letter-spacing:.06em}
+.step h4{font-family:var(--font-mono); font-weight:600; font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:20px 0 4px}
+.step h4.predict{color:var(--warn)}
+.step > :last-child{margin-bottom:0}
+.predict-box{border-left:3px solid var(--warn); background:var(--warn-soft); border-radius:3px; padding:11px 15px; margin:8px 0}
+.predict-box p{margin:4px 0; max-width:62ch}
+.predict-box :first-child{margin-top:0} .predict-box :last-child{margin-bottom:0}
+.labtrack{list-style:none; padding:0; margin:0}
+.labtrack li{border:0; background:transparent; margin:0}
+.labtrack label{display:flex; gap:10px; align-items:center; padding:0; cursor:pointer; font-family:var(--font-mono); font-size:11px; color:var(--muted)}
+.labtrack input{accent-color:var(--accent); width:14px; height:14px; margin:0}
+.labtrack input:checked + span{color:var(--accent)}
+.backlink{font-family:var(--font-mono); font-size:11px; margin:0 0 18px}
+
+@media (max-width:900px){
+  .shell{grid-template-columns:minmax(0,1fr)}
+  .rail{position:static; max-height:none; border-right:0; border-bottom:1px solid var(--rule); padding:26px 20px 22px}
+  .rail nav{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:1px}
+  main{padding:30px 20px 80px}
+  body{font-size:16px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+</style>
+</head>
+<body>
+<main class="solo">
+  <p class="backlink"><a href="index.html">← Kafka Deep Dive</a></p>
+  <p class="eyebrow">Module 4 · lab worksheet</p>
+  <h1>Lab 04 — KRaft and the metadata plane</h1>
+  <p class="lede">Five steps, no Python. You read the controller quorum, find your own topic creation sitting in the metadata log as records, kill the active controller and time the failover. Metadata stops being an abstraction the moment you read it as a log.</p>
+  <p class="qmeta">Expect 30-40 minutes. Three nodes in combined mode; production uses isolated controllers, and step 5 covers why.</p>
+
+  <ul class="labtrack qlist" data-store="lab04-steps" style="margin:22px 0">
+    <li><label><input type="checkbox" data-q="1"><span>1 · Read the quorum</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span>2 · Find your topic in the metadata log</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span>3 · Kill the active controller</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span>4 · Watch brokers follow by offset</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span>5 · Combined vs isolated</span></label></li>
+  </ul>
+
+  <h2>Setup</h2>
+  <p>Broker ports clash with labs 01 and 03 — <code>docker compose down</code> in those first.</p>
+<pre>cd labs/lab04-kraft
+docker compose up -d &amp;&amp; docker compose ps</pre>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 1</span>Read the quorum</h3>
+    <p><strong>Proves:</strong> the control plane is a Raft quorum over a log, with offsets and lag like any other Kafka log.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Three combined-mode nodes. How many are <em>voters</em> in the metadata quorum, how many are <em>observers</em>, and how many can report themselves as the active controller at once?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab04-kafka1 /opt/kafka/bin/kafka-metadata-quorum.sh \
+  --bootstrap-server localhost:9092 --describe --status
+
+docker exec lab04-kafka1 /opt/kafka/bin/kafka-metadata-quorum.sh \
+  --bootstrap-server localhost:9092 --describe --replication</pre>
+
+    <h4>Expected</h4>
+<pre>ClusterId:              MkU3OEVBNTcwNTJENDM2Qk
+LeaderId:               2
+LeaderEpoch:            4
+HighWatermark:          1183
+CurrentVoters:          [1, 2, 3]
+CurrentObservers:       []</pre>
+    <p>And a per-replica table with <code>LogEndOffset</code> and <code>Lag</code> for each node.</p>
+
+    <h4>Why</h4>
+    <p>That output is a Kafka log's vocabulary — leader, epoch, high watermark, log end offset, lag — applied to cluster metadata. That is the whole of KIP-500 in one screen: Kafka is a replicated log, metadata needs replicating, so metadata goes in a Kafka log.</p>
+    <p>All three nodes are voters here because all three have the <code>controller</code> role. In isolated mode, controllers are voters and brokers appear as <strong>observers</strong>: they fetch the log but do not vote. Exactly one node is leader — the <strong>active controller</strong> — and it is the only one allowed to write metadata. <code>LeaderEpoch</code> is the same epoch concept as M3's leader epoch, doing the same job one layer up.</p>
+
+    <h4>Check yourself</h4>
+    <p>Quorum sizing follows Raft: N voters tolerate (N-1)/2 failures. How many failures does a 4-controller quorum tolerate, and how does that compare to 3? What does that tell you about ever choosing an even number?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 2</span>Find your own topic inside the metadata log</h3>
+    <p><strong>Proves:</strong> metadata changes are log records, not a database write.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>You will create one topic with 3 partitions. How many records do you expect that to append to <code>__cluster_metadata</code> — one, three, or four? What would each one be?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker exec lab04-kafka1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --topic lab04.metadata-demo --partitions 3 --replication-factor 3
+
+docker exec lab04-kafka1 /opt/kafka/bin/kafka-dump-log.sh \
+  --cluster-metadata-decoder \
+  --files /tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log \
+  | tail -30</pre>
+
+    <h4>Expected</h4>
+    <p>Near the end of the dump, one <code>TopicRecord</code> carrying the topic name and its id, followed by one <code>PartitionRecord</code> per partition, each holding the replica list, the ISR, the leader and a leader epoch. Four records for a three-partition topic.</p>
+
+    <h4>Why</h4>
+    <p>Creating a topic is an append to a log. Every broker learns about it by fetching those records and applying them in order — the same mechanism as a consumer reading a topic, which is why the ordering guarantees are the ones you already understand from M1.</p>
+    <p>Notice what a <code>PartitionRecord</code> contains: replicas, ISR, leader, leader epoch. Everything M3 was about is stored here. When the ISR shrinks because a follower fell behind, that is a new record appended to this log by the active controller, and every broker learns of it by fetching.</p>
+
+    <h4>Then try the state view</h4>
+<pre>docker exec -it lab04-kafka1 /opt/kafka/bin/kafka-metadata-shell.sh \
+  --snapshot /tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log
+<span class="c"># ls /</span>
+<span class="c"># cat /image/topics</span>
+<span class="c"># exit</span></pre>
+    <p>The dump shows the <em>log</em>; the shell shows the <em>state</em> that replaying the log produces. Same relationship as a compacted topic and the table it converges to, from M2.</p>
+
+    <h4>Check yourself</h4>
+    <p>This log records every metadata change ever made and is replayed on startup. What stops it from growing forever and making startup slower every month?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 3</span>Kill the active controller and time the failover</h3>
+    <p><strong>Proves:</strong> failover is an election, not a state transfer.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>Under ZooKeeper, a controller failover on a large cluster took minutes because the new controller loaded all state from ZooKeeper first. Here, how long do you expect it to take — and what is the new controller <em>not</em> having to do?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre><span class="c"># LeaderId from step 1 tells you which node to kill</span>
+docker stop lab04-kafka2
+
+docker exec lab04-kafka1 /opt/kafka/bin/kafka-metadata-quorum.sh \
+  --bootstrap-server localhost:9092 --describe --status
+
+<span class="c"># and confirm the data plane never noticed</span>
+docker exec lab04-kafka1 /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --describe --topic lab04.metadata-demo</pre>
+
+    <h4>Expected</h4>
+    <p>A new <code>LeaderId</code> and an incremented <code>LeaderEpoch</code>, effectively immediately. Partitions whose leader was on the stopped node have been re-elected; the rest are untouched.</p>
+
+    <h4>Why</h4>
+    <p>The surviving controllers had been applying the same metadata log all along, so the promoted one already holds the full state in memory. Promotion is a Raft election — a majority vote and an epoch bump — with no state to load. That is why failover no longer scales with partition count, and why the practical ~200k partition ceiling of the ZooKeeper era went away: the ceiling was set by failover time, not by disk or throughput.</p>
+    <p>Note also what did <em>not</em> happen: no produce or consume was interrupted on partitions whose leader survived. The control plane and data plane are genuinely separate.</p>
+
+    <h4>Check yourself</h4>
+    <p>Suppose you stop two of the three nodes instead of one. Metadata operations stop — but can producers still write to a partition whose leader is the surviving broker? And what happens if <em>that</em> broker then loses a follower?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 4</span>Watch brokers follow the log by offset</h3>
+    <p><strong>Proves:</strong> "this broker is behind" is now a number.</p>
+
+    <h4>Run</h4>
+<pre>docker start lab04-kafka2
+<span class="c"># immediately, repeatedly:</span>
+docker exec lab04-kafka1 /opt/kafka/bin/kafka-metadata-quorum.sh \
+  --bootstrap-server localhost:9092 --describe --replication</pre>
+
+    <h4>Expected</h4>
+    <p>The restarted node reappears with a <code>LogEndOffset</code> behind the others and a non-zero <code>Lag</code>, which closes over a few seconds as it catches up.</p>
+
+    <h4>Why</h4>
+    <p>This is the quiet improvement over ZooKeeper, and the one worth having an opinion about. Previously the controller pushed metadata updates by RPC; a broker that missed one had no way to notice, because there was no version and no offset to compare against — divergence was possible and undetectable. Now metadata is a log, every node has an offset, and being behind is a measurable quantity.</p>
+    <p>In production the metric is <code>MetadataLag</code> per broker. Sustained non-zero lag means a broker is acting on a stale view of leadership and topic configuration — which looks like inexplicable client errors long before it looks like a metadata problem.</p>
+
+    <h4>Check yourself</h4>
+    <p>A broker has 4,000 metadata records of lag. Name two client-visible symptoms that could produce, before anyone thinks to look at the control plane.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 5</span>Combined vs isolated, and what this lab is not showing you</h3>
+    <p><strong>Proves:</strong> the shape you run in production is not the shape in this compose file.</p>
+
+    <h4>Run</h4>
+<pre>docker exec lab04-kafka1 env | grep PROCESS_ROLES
+docker exec lab04-kafka1 /opt/kafka/bin/kafka-metadata-quorum.sh \
+  --bootstrap-controller localhost:9093 --describe --status</pre>
+
+    <h4>Why</h4>
+    <p>Every node here is <code>broker,controller</code> — <strong>combined mode</strong>. Three containers instead of six, which is right for a laptop and wrong for production. The failure mode it invites is precisely the cost it saves: a node under data-plane pressure — GC, disk saturation, a hot partition — is also a controller, and starving the control plane during a data-plane incident is how a bad hour becomes a bad day.</p>
+    <p><strong>Isolated mode</strong> gives controllers their own small nodes. They are sized by metadata volume, which means partition count, not by throughput — so a cluster pushing gigabytes a second runs a happy three-node quorum on small instances. Brokers then appear as <strong>observers</strong> in <code>--describe --replication</code>: they fetch the metadata log but do not vote.</p>
+    <p>Note the second command: <code>--bootstrap-controller</code> talks to the controller listener directly, which still works when brokers are unhealthy. During an incident where brokers are not answering, that is how you ask the control plane what it thinks is happening.</p>
+
+    <h4>Check yourself</h4>
+    <p>You are sizing a new cluster: 40 brokers, 50,000 partitions, 2 GB/s. How many controllers, isolated or combined, and what sizes them? Which of those three numbers is irrelevant to the answer?</p>
+  </div>
+
+  <h2>Tear down</h2>
+<pre>docker compose down -v</pre>
+
+  <h2>When something goes wrong</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+    <tbody>
+      <tr><td>Ports already in use</td><td>Lab 01 or 03 is still up. <code>docker compose down</code> in those directories.</td></tr>
+      <tr><td><code>kafka-dump-log.sh</code> prints nothing readable</td><td><code>--cluster-metadata-decoder</code> is required for this topic; without it the records are opaque bytes.</td></tr>
+      <tr><td>Metadata shell will not open the file</td><td>Point it at the newest <code>.log</code> or <code>.checkpoint</code> in <code>__cluster_metadata-0/</code>; list the directory first.</td></tr>
+      <tr><td>Quorum commands hang after stopping a node</td><td>You stopped the node you were connecting through. Use another container, or <code>--bootstrap-controller</code>.</td></tr>
+      <tr><td>No new leader after stopping one node</td><td>Give it a second and re-run. If two of three are down there is no majority and no election is possible — that is the quorum working.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Done when</h2>
+  <p>You can answer these without looking anything up: what <code>__cluster_metadata</code> is and who writes it; what records a topic creation appends; why failover no longer scales with partition count; what "behind" means for a broker now and why it could not be measured before; and why production separates controllers from brokers.</p>
+</main>
+
+<script>
+(function(){
+  "use strict";
+
+  // murmur2, matching org.apache.kafka.common.utils.Utils.murmur2
+  function murmur2(bytes){
+    var seed = 0x9747b28c, m = 0x5bd1e995, r = 24;
+    var len = bytes.length, len4 = len & ~3;
+    var h = (seed ^ len) >>> 0;
+    for (var i = 0; i < len4; i += 4){
+      var k = (bytes[i] & 0xff) | ((bytes[i+1] & 0xff) << 8) | ((bytes[i+2] & 0xff) << 16) | (bytes[i+3] << 24);
+      k = Math.imul(k, m) >>> 0;
+      k = (k ^ (k >>> r)) >>> 0;
+      k = Math.imul(k, m) >>> 0;
+      h = Math.imul(h, m) >>> 0;
+      h = (h ^ k) >>> 0;
+    }
+    var rem = len & 3;
+    if (rem === 3) h = (h ^ ((bytes[len4+2] & 0xff) << 16)) >>> 0;
+    if (rem >= 2)  h = (h ^ ((bytes[len4+1] & 0xff) << 8)) >>> 0;
+    if (rem >= 1){ h = (h ^ (bytes[len4] & 0xff)) >>> 0; h = Math.imul(h, m) >>> 0; }
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = Math.imul(h, m) >>> 0;
+    h = (h ^ (h >>> 15)) >>> 0;
+    return h;
+  }
+  function partitionOf(key, n){
+    if (!key.length || !(n > 0)) return null;
+    return ((murmur2(new TextEncoder().encode(key)) & 0x7fffffff) % n);
+  }
+
+  var elKey = document.getElementById('k-key');
+  if (elKey){
+    var elB = document.getElementById('k-before');
+    var elA = document.getElementById('k-after');
+    var outH = document.getElementById('k-hash');
+    var outP1 = document.getElementById('k-p1');
+    var outP2 = document.getElementById('k-p2');
+    var outV = document.getElementById('k-verdict');
+
+    var recompute = function(){
+      var key = elKey.value;
+      var nb = parseInt(elB.value, 10), na = parseInt(elA.value, 10);
+      if (!key.length){
+        outH.textContent = outP1.textContent = outP2.textContent = '—';
+        outV.className = 'verdict';
+        outV.textContent = 'Empty key means a null key: the sticky partitioner decides, nothing is hashed.';
+        return;
+      }
+      outH.textContent = murmur2(new TextEncoder().encode(key)).toString(10);
+      var p1 = partitionOf(key, nb), p2 = partitionOf(key, na);
+      outP1.textContent = p1 === null ? '—' : p1;
+      outP2.textContent = p2 === null ? '—' : p2;
+      if (p1 === null || p2 === null){
+        outV.className = 'verdict';
+        outV.textContent = 'Partition count must be at least 1.';
+      } else if (p1 === p2){
+        outV.className = 'verdict kept';
+        outV.textContent = 'Key stays on the same partition — ordering for this key is unaffected.';
+      } else {
+        outV.className = 'verdict moved';
+        outV.textContent = 'Key moves from partition ' + p1 + ' to ' + p2 + '. Older events stay on ' + p1 + ' while new ones go to ' + p2 + ', so ordering breaks.';
+      }
+    };
+    [elKey, elB, elA].forEach(function(el){ el.addEventListener('input', recompute); });
+    recompute();
+  }
+
+  // Checklist state, stored per viewer in their own browser; best-effort.
+  document.querySelectorAll('.qlist[data-store]').forEach(function(list){
+    var KEY = 'kafka-dd-' + list.dataset.store;
+    var boxes = Array.prototype.slice.call(list.querySelectorAll('input[type=checkbox]'));
+    var counter = document.querySelector('[data-count-for="' + list.dataset.store + '"]');
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { saved = {}; }
+    var render = function(){
+      if (!counter) return;
+      var done = boxes.filter(function(b){ return b.checked; }).length;
+      counter.textContent = done + ' / ' + boxes.length + (done === boxes.length ? ' — all done' : '');
+    };
+    boxes.forEach(function(b){
+      if (saved[b.dataset.q]) b.checked = true;
+      b.addEventListener('change', function(){
+        var state = {};
+        boxes.forEach(function(x){ if (x.checked) state[x.dataset.q] = 1; });
+        try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+        render();
+      });
+    });
+    render();
+  });
+})();
+</script>
+</body>
+</html>

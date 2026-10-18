@@ -198,13 +198,19 @@ pre .c{color:var(--muted)}
 
   <nav>
     <a class="wip" href="#m3"><span class="n">M3</span><span>Replication &amp; ISR</span></a>
-    <a class="wip" href="lab-03-replication.html"><span class="n">↳</span><span>Lab 03 worksheet</span></a>
+    <a class="done" href="lab-03-replication.html"><span class="n">↳</span><span>Lab 03 worksheet</span></a>
     <a class="wip" href="#q-m3"><span class="n">↳</span><span>Questions</span></a>
+    <a class="done" href="#a-m3"><span class="n">↳</span><span>Model answers</span></a>
+  </nav>
+
+  <nav>
+    <a class="wip" href="#m4"><span class="n">M4</span><span>KRaft</span></a>
+    <a class="wip" href="lab-04-kraft.html"><span class="n">↳</span><span>Lab 04 worksheet</span></a>
+    <a class="wip" href="#q-m4"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
   <h3>Not started</h3>
   <nav>
-    <a class="todo" href="#roadmap"><span class="n">M4</span><span>KRaft</span></a>
     <a class="todo" href="#roadmap"><span class="n">M5</span><span>Producer</span></a>
     <a class="todo" href="#roadmap"><span class="n">M6</span><span>Consumer</span></a>
     <a class="todo" href="#roadmap"><span class="n">M7</span><span>Transactions</span></a>
@@ -228,9 +234,9 @@ pre .c{color:var(--muted)}
       <tr><td rowspan="3">A · Foundations</td><td class="num">M0</td><td>Kafka as a commit log; RabbitMQ / Pulsar / SQS comparison; when not to use it; Share Groups</td><td><code>done</code></td></tr>
       <tr><td class="num">M1</td><td>Topic, partition, offset, replica, consumer group, ordering guarantees</td><td><code>done</code></td></tr>
       <tr><td class="num">M2</td><td>Log segments, indexes, page cache, zero-copy, retention, compaction, tiered storage</td><td><code>done</code></td></tr>
-      <tr><td rowspan="2">B · Core mechanics</td><td class="num">M3</td><td>Replication, ISR, LEO vs high watermark, unclean leader election, data-loss matrix</td><td><code>in progress</code></td></tr>
-      <tr><td class="num">M4</td><td>KRaft: quorum controller, metadata log, why ZooKeeper had to go</td><td>next</td></tr>
-      <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td>—</td></tr>
+      <tr><td rowspan="2">B · Core mechanics</td><td class="num">M3</td><td>Replication, ISR, LEO vs high watermark, unclean leader election, data-loss matrix</td><td><code>done</code></td></tr>
+      <tr><td class="num">M4</td><td>KRaft: quorum controller, metadata log, why ZooKeeper had to go</td><td><code>in progress</code></td></tr>
+      <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td>next</td></tr>
       <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td>—</td></tr>
       <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td>—</td></tr>
       <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td>—</td></tr>
@@ -732,6 +738,105 @@ acks                 = all   <span class="c"># producer waits for the whole ISR<
   <p class="qmeta" data-count-for="m3-questions">0 / 10</p>
 
 
+  <p class="eyebrow">Module 4</p>
+  <h1>KRaft &amp; the metadata plane</h1>
+  <p class="lede">Everything so far has been the data plane. This is the other half: how the cluster knows who leads which partition, and why Kafka spent five years replacing the system that used to answer that.</p>
+
+  <h2 id="m4">What ZooKeeper was actually doing</h2>
+  <p>Before 4.0, a Kafka cluster was two distributed systems. ZooKeeper held the <strong>metadata</strong>: which brokers are alive, which topics exist, how partitions are assigned, who leads each one, the ISR, topic configs and ACLs. One broker was elected <strong>controller</strong> and was the only component allowed to write that metadata; everyone else read it.</p>
+  <p>The data plane never touched ZooKeeper — producing and consuming went broker to broker. ZooKeeper was the control plane only, which is why clusters could be enormous and still keep a modest ZooKeeper ensemble.</p>
+
+  <h3>Why it had to go</h3>
+  <ul>
+    <li><strong>Two systems to operate.</strong> Two sets of config, two security models, two upgrade paths, two sets of failure modes, two on-call runbooks — for one product. Most Kafka outages that were not disk-related were ZooKeeper-related.</li>
+    <li><strong>Controller failover was O(partitions).</strong> A new controller had to <em>load the entire cluster state out of ZooKeeper</em> before it could act. On a large cluster that was minutes of no leader elections, no topic changes, and no recovery from any other failure happening at the same time. Failover time grew with the thing you most wanted to grow.</li>
+    <li><strong>Metadata propagation was RPC push.</strong> The controller pushed updates to brokers individually. A broker that missed one had no way to notice: there was no version, no offset, nothing to compare. Divergence was possible and hard to detect.</li>
+    <li><strong>A hard ceiling on partitions.</strong> Roughly 200k per cluster in practice, set by that load-everything failover, not by disk or throughput.</li>
+  </ul>
+
+  <h2>KRaft: metadata as a Kafka log</h2>
+  <p>The insight behind KIP-500 is almost circular, and it is the thing to lead with in an interview: <strong>Kafka is a replicated log, and metadata is a thing that needs replicating — so store the metadata in a Kafka log.</strong></p>
+  <p>A set of <strong>controller</strong> nodes forms a Raft quorum over a single-partition internal topic, <code>__cluster_metadata</code>. The Raft leader is the <strong>active controller</strong>; the others are followers that already hold the whole log.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>ZooKeeper era</th><th>KRaft</th></tr></thead>
+    <tbody>
+      <tr><td>Where metadata lives</td><td>ZooKeeper znodes</td><td><code>__cluster_metadata</code>, a Kafka log</td></tr>
+      <tr><td>How it replicates</td><td>ZAB, inside ZooKeeper</td><td>Raft, inside Kafka</td></tr>
+      <tr><td>How brokers learn</td><td>Controller pushes by RPC</td><td>Brokers <strong>fetch the log</strong>, like consumers</td></tr>
+      <tr><td>Controller failover</td><td>Load all state from ZK — O(partitions)</td><td>Standby already has it in memory — near-instant</td></tr>
+      <tr><td>Can a broker tell it is behind?</td><td>No</td><td>Yes — it has an offset and a lag</td></tr>
+      <tr><td>Processes to operate</td><td>Kafka + ZooKeeper</td><td>Kafka</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Three consequences are worth being able to state in your own words:</p>
+  <ol>
+    <li><strong>Brokers are observers of the metadata log.</strong> They fetch records and apply them in order, exactly as a consumer does. Metadata becomes eventually consistent with a measurable lag rather than a push that might have been missed — and "this broker is 4,000 metadata records behind" is now a sentence you can say, and alert on.</li>
+    <li><strong>Failover is fast because nothing is loaded.</strong> Standby controllers have been applying the same log all along, so promotion is a Raft election, not a state transfer. Milliseconds instead of minutes, and it no longer scales with partition count.</li>
+    <li><strong>The metadata log is compacted, with snapshots.</strong> It would otherwise grow forever. Periodic snapshots capture the full state so the log can be truncated, and a new controller or a far-behind broker loads the latest snapshot and replays only what came after.</li>
+  </ol>
+
+  <h2>Deployment shapes and quorum sizing</h2>
+  <p>Every node declares <code>process.roles</code>:</p>
+  <ul>
+    <li><strong>Isolated</strong> — <code>controller</code> or <code>broker</code>, never both. Dedicated controllers are small, cheap, and insulated from data-plane load; a broker under GC pressure cannot destabilise the control plane. This is the production shape.</li>
+    <li><strong>Combined</strong> — <code>broker,controller</code> on one node. Fewer machines, fine for development and small clusters, and what every lab in this repo uses. The risk is exactly the one it saves money on: data-plane load can starve the controller.</li>
+  </ul>
+  <p>Quorum sizing follows Raft, not replication factor: a quorum of <em>N</em> tolerates <em>(N-1)/2</em> failures, so <strong>3 controllers tolerate one loss and 5 tolerate two</strong>. Even numbers buy nothing — 4 tolerates the same single failure as 3, while adding another node that must agree. Three is the normal answer; five is for clusters where controller loss is genuinely costly.</p>
+  <p>Controllers are sized by metadata volume, meaning partition count, not by throughput. This surprises people: a cluster pushing gigabytes a second can run a perfectly happy three-node controller quorum on small instances.</p>
+
+  <h2>What changed in day-to-day operation</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Then</th><th>Now</th></tr></thead>
+    <tbody>
+      <tr><td><code>--zookeeper host:2181</code></td><td><code>--bootstrap-server</code>, or <code>--bootstrap-controller</code> for quorum-level commands</td></tr>
+      <tr><td>ZooKeeper four-letter words, <code>zkCli.sh</code></td><td><code>kafka-metadata-quorum.sh --describe --status</code> / <code>--replication</code></td></tr>
+      <tr><td>Browse znodes to inspect state</td><td><code>kafka-metadata-shell.sh</code>, or <code>kafka-dump-log.sh --cluster-metadata-decoder</code></td></tr>
+      <tr><td>ZooKeeper creates the cluster id</td><td><code>kafka-storage.sh format --cluster-id</code> before first start</td></tr>
+      <tr><td>Separate ZooKeeper ACLs</td><td>One security model</td></tr>
+    </tbody>
+  </table></div>
+  <p>Metrics worth knowing: <code>MetadataLag</code> per broker (how far behind the metadata log it is — the new divergence detector), <code>ActiveControllerCount</code> (must be exactly 1 across the cluster; 0 means no controller, 2 means split brain), and the quorum's own <code>CurrentLeader</code> and high watermark.</p>
+
+  <h2>Timeline, and why it matters for an interview</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Version</th><th>What happened</th></tr></thead>
+    <tbody>
+      <tr><td>2.8 (2021)</td><td>KRaft early access — not for production</td></tr>
+      <tr><td>3.3</td><td>KRaft marked production-ready for new clusters</td></tr>
+      <tr><td>3.5-3.9</td><td>Migration path from ZooKeeper; ZooKeeper deprecated</td></tr>
+      <tr><td><strong>4.0</strong> (2025)</td><td><strong>ZooKeeper removed entirely.</strong> KRaft only.</td></tr>
+    </tbody>
+  </table></div>
+  <p>The operational consequence people miss: because 4.0 removed ZooKeeper support outright, a cluster still on ZooKeeper <strong>cannot upgrade directly to 4.x</strong>. It has to go to a 3.x version first, migrate to KRaft there, and only then upgrade. That is a real migration-planning fact rather than trivia, and it is the kind of detail that separates "I read the release notes" from "I have had to plan this".</p>
+
+  <div class="callout">
+    <span class="tag">Answering "why did Kafka drop ZooKeeper?"</span>
+    <p>The weak answer is "to simplify operations" — true, and it sounds like a slide. The strong answer names the mechanism: <em>controller failover required loading the entire cluster state out of ZooKeeper, so recovery time scaled with partition count and capped cluster size. Putting metadata in a Raft-replicated Kafka log means standby controllers already hold the state, so failover becomes an election rather than a state transfer — and brokers consume metadata as a log with an offset, which makes "behind" a measurable quantity instead of an invisible one.</em> Operational simplicity is a consequence, not the reason.</p>
+  </div>
+
+  <h2 id="lab04">Lab 04</h2>
+  <p><strong><a href="lab-04-kraft.html">Open the step-by-step worksheet →</a></strong> — five steps: inspect the quorum, read your own topic creation back out of the metadata log as a record, kill the active controller and time the failover, watch brokers follow the metadata log by offset, and find the snapshot.</p>
+  <p>Step 2 is the one that makes the idea land: create a topic, then dump <code>__cluster_metadata</code> and find the <code>TopicRecord</code> and <code>PartitionRecord</code> your command produced. Metadata stops being an abstraction the moment you read it as log records.</p>
+
+    <h2 id="q-m4">Interview questions — module 4</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m4-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>What did ZooKeeper store for Kafka, and what did it not touch?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>In KRaft, where does cluster metadata live?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is the difference between combined and isolated mode, and how many controllers should a quorum have?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>How do brokers learn about metadata changes in KRaft, and why is that better than the push model?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Why is controller failover so much faster under KRaft?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Why does the metadata log need snapshots?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why did Kafka drop ZooKeeper? Answer at the mechanism level.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A cluster is running Kafka 3.4 on ZooKeeper and the team wants to be on 4.x. Plan it.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>ActiveControllerCount is 2 across the cluster. What does that mean and how bad is it?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Does KRaft change the durability story from M3 at all?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m4-questions">0 / 10</p>
+
+
   <h2 id="a-m0">Model answers — module 0</h2>
   <p>Senior-tier answers at the depth an interview is looking for. Written after the attempt, never before.</p>
 
@@ -872,6 +977,48 @@ acks                 = all   <span class="c"># producer waits for the whole ISR<
   <p><strong>What it costs.</strong> A latency cliff for any consumer that falls behind into remote segments — fine for a backfill, bad for a consumer you expected to stay near the head, and worth a separate alert. A second storage system inside the failure and security surface: its availability becomes the cluster's availability for historical reads, and its access control becomes part of the data's access control. And it does not apply to compacted topics.</p>
 
   <p><strong>How to decide.</strong> Tiered storage decouples retention from cluster size. So the question to ask first is whether retention is the thing sizing the cluster today. If the cluster is sized by throughput or partition count instead, tiered storage buys little and adds a dependency — and the honest recommendation is to leave it off.</p>
+
+  <h2 id="a-m3">Model answers — module 3</h2>
+  <p class="qmeta">Written rather than attempted. Flagged for a cold retry in M13.</p>
+
+  <h3>Q1-Q3 · Junior tier, condensed</h3>
+  <p><strong>The ISR</strong> is the set of replicas currently keeping up with the leader — a follower stays in while it has fetched to the leader's log end offset within <code>replica.lag.time.max.ms</code> (30 s). It is not the replica list, and it moves continuously; almost every durability question reduces to how large it was at the moment of failure.</p>
+  <p><strong><code>acks</code></strong>: <code>0</code> does not wait, so a network blip loses records with no retry possible. <code>1</code> returns once the leader has written to its own log, so a leader failure before replication loses an acknowledged write silently. <code>all</code> returns once every replica <em>in the ISR</em> has it. Since Kafka 3.0 the producer defaults are <code>acks=all</code> and <code>enable.idempotence=true</code> (KIP-679).</p>
+  <p><strong><code>replication.factor=3</code></strong> gives three copies on three brokers — one leader serving all traffic, two followers fetching. It lets the cluster lose a broker and still have a choice of replica to promote. On its own it guarantees nothing about data loss: a replica that exists but has fallen out of the ISR protects nothing.</p>
+
+  <h3>Q4-Q6 · Mid tier, condensed</h3>
+  <p><strong>High watermark</strong> — the minimum log end offset across the ISR, and the furthest point consumers may read. A record only on the leader is not durable; serving it would let a consumer read something a failover could take away, making the log appear to go backwards. The cost is that a record becomes readable one replication round-trip after it is acknowledged.</p>
+  <p><strong>Why <code>acks=all</code> is not enough</strong> — "all" means all replicas in the ISR. When followers drop out, the ISR is the leader alone and <code>acks=all</code> is satisfied by it, silently becoming <code>acks=1</code> at the worst possible moment. <code>min.insync.replicas=2</code> converts that into a rejected write (<code>NOT_ENOUGH_REPLICAS</code>).</p>
+  <p><strong><code>Replicas: 2,3,1 · Isr: 2,3</code> with min ISR 2</strong> — broker 1 has fallen behind and been evicted, so the partition is under-replicated. Writes still succeed because the ISR equals the floor, but there is no margin: one more failure and <code>acks=all</code> producers start failing. Broker 2 is the preferred leader and currently holds leadership. A warning, not an outage.</p>
+
+  <h3>Q7 · Every configuration that can lose an acknowledged write</h3>
+  <p><strong>1 · <code>acks=1</code>.</strong> The leader acknowledges before any follower has the record, then dies. A follower is promoted, the record never existed there, and the producer was told it succeeded. Silent by construction.</p>
+  <p><strong>2 · <code>acks=all</code> with <code>min.insync.replicas=1</code>.</strong> The dangerous one, because the configuration looks correct. The ISR shrinks to the leader alone and <code>acks=all</code> is satisfied by a single replica — identical exposure to case 1, reached through a setting that reads as safe in a review.</p>
+  <p><strong>3 · Unclean leader election enabled.</strong> The whole ISR is lost, a stale replica is promoted, and every record past its log end offset is permanently gone. Consumers that already read those offsets see the log move backwards — the only case here where a consumer can observe the loss directly.</p>
+  <p><strong>4 · Correlated power loss across the ISR.</strong> Kafka does not fsync per record; durability is replication, not flushing. If every replica sits in one rack, one availability zone or one power domain and they lose power together, data that every replica acknowledged can be gone. This is the case people omit, and it is the reason <code>broker.rack</code> and rack-aware placement exist.</p>
+  <p><strong>The intended configuration</strong> is RF 3, <code>min.insync.replicas=2</code>, <code>acks=all</code>, unclean election off, replicas spread across racks. What it expresses is a single principle: <strong>Kafka's durability story is to refuse writes rather than lose them.</strong> Every setting above either upholds that or deliberately opts out of it, and framing the answer that way is what turns a list into a position.</p>
+
+  <h3>Q8 · The whole ISR is gone and one stale replica survives</h3>
+  <p>Two options and no third. <strong>Offline</strong> (<code>unclean.leader.election.enable=false</code>, the default): no acknowledged write is lost, and the partition is unavailable until an in-sync replica returns — possibly until one specific dead broker is physically recovered, which can be hours. <strong>Promote the stale replica</strong> (<code>true</code>): writes resume immediately, every record beyond its log end offset is permanently gone, and consumers that read those offsets see the log go backwards.</p>
+  <p>No setting avoids the trade; this is the clearest CAP choice Kafka exposes.</p>
+  <p>The decision is <strong>per topic class</strong>, and naming the dimension is what makes it a senior answer: <em>does a downstream consumer treat this log as a source of truth?</em> Clickstream, metrics, application logs — a gap is survivable, downtime is not, so enable it. A payment ledger, an event-sourced aggregate, anything another system reconciles against — never, take the outage and escalate. "It depends" without naming that dimension is not an answer.</p>
+  <p>Two things to add if pressed. The choice should be made per topic at creation time, not cluster-wide under incident pressure, because under pressure availability always wins the argument. And if you are reaching for unclean election regularly, the real problem is replica placement: a partition whose whole ISR can vanish at once was not spread across failure domains.</p>
+
+  <h3>Q9 · Why leader epoch was introduced</h3>
+  <p>When a failed replica rejoins it may hold records the new leader never had, so it must truncate before it can follow — the question is to what offset.</p>
+  <p>Originally it truncated to its own high watermark. The HW propagates to followers one fetch round-trip after it advances on the leader, so a follower's idea of the HW is always slightly stale. During a double failure — leader dies, a follower with a stale HW is promoted, the old leader returns — the two replicas could disagree about what had been committed. The outcomes were real: committed records silently lost, or two logs diverging at the same offsets while both replicas believed they were in sync, which is worse because nothing detects it.</p>
+  <p><strong>Leader epoch (KIP-101, Kafka 0.11)</strong> replaced the guess with a fact. Every leader election increments an epoch number, and each replica keeps a <code>leader-epoch-checkpoint</code> file mapping each epoch to the offset at which it began — the file visible in any partition directory. A recovering follower asks the leader where epoch N ended and truncates to exactly that offset. Deterministic, and divergence becomes impossible rather than unlikely.</p>
+  <p>It is not configurable and needs no operational attention. It is worth knowing because it is the honest answer to "has Kafka ever lost data in normal operation" — yes, before 0.11, through precisely this path. Being able to say that, and say what fixed it, reads as someone who has read the design rather than the marketing.</p>
+
+  <h3>Q10 · UnderMinIsrPartitionCount is 4 and producers are erroring</h3>
+  <p><strong>Read the signal first.</strong> The ISR has fallen below <code>min.insync.replicas</code> on four partitions, so <code>acks=all</code> producers are being rejected with <code>NOT_ENOUGH_REPLICAS</code>. The cluster is doing exactly what it was configured to do: refusing writes it cannot make durable. The errors are a symptom; the incident is the under-replication.</p>
+  <p><strong>Split the diagnosis in two.</strong> Are brokers <em>down</em>, or <em>alive but lagging</em>? <code>OfflinePartitionsCount</code> and broker liveness answer the first; <code>IsrShrinksPerSec</code> answers the second. The two have completely different causes and fixes, and guessing wrong wastes the first ten minutes.</p>
+  <ul>
+    <li><strong>Brokers down</strong> → how many, and are the affected partitions' replicas concentrated on them? That points at replica placement rather than at the failure.</li>
+    <li><strong>Alive but lagging</strong> → the follower fetch loop is behind. Usual causes: a GC pause, a saturated network link, a disk that has silently slowed, or one broker holding a disproportionate share of leadership after an earlier failover and now saturating.</li>
+  </ul>
+  <p><strong>The wrong instinct, and it is worth saying out loud.</strong> Lowering <code>min.insync.replicas</code> stops the errors immediately — and converts a loud failure into a silent one, accepting under-replicated writes during the exact window where a second failure loses them. It is the most tempting action on the page and the one to refuse. Mitigate by restoring replicas.</p>
+  <p><strong>Afterwards.</strong> Check leadership distribution: leaders stay where a failover put them, so recovery is not finished when brokers return. <code>auto.leader.rebalance.enable</code> fixes it eventually; <code>kafka-leader-election.sh --election-type preferred</code> fixes it now. Then ask why the ISR could shrink that far at all — if these partitions share a rack or a disk, the placement is the finding, not the lag.</p>
 </main>
 </div>
 

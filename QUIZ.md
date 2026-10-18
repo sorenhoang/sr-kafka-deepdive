@@ -391,3 +391,102 @@ When a failed replica rejoins it may hold records the new leader never had, so i
 `UnderMinIsrPartitionCount > 0` means the ISR has fallen below `min.insync.replicas` on those partitions, so `acks=all` producers are being rejected with `NOT_ENOUGH_REPLICAS` right now — the cluster is working as designed, refusing writes rather than losing them. First establish whether brokers are down (`OfflinePartitionsCount`, broker liveness) or whether brokers are alive but lagging, which `IsrShrinksPerSec` distinguishes. Alive-but-lagging points at the follower fetch loop: GC pauses, a saturated network link, a disk that has slowed, or a single broker holding too many leaders after an earlier failover. Mitigate by restoring replicas, not by lowering `min.insync.replicas` — that converts a loud failure into a silent one and is the wrong instinct under pressure. Afterwards, check leadership distribution, because leaders concentrate on whichever brokers recovered first; `auto.leader.rebalance.enable` handles it eventually, and `kafka-leader-election.sh --election-type preferred` forces it. The thing to say out loud: rejected writes are the system doing its job, and the incident is the under-replication, not the errors.
 
 </details>
+
+
+## M4 · KRaft & the metadata plane
+
+### Junior
+
+**M4.1** — What did ZooKeeper store for Kafka, and what did it not touch?
+
+<details>
+<summary>Answer</summary>
+
+It held the control plane: which brokers are alive, which topics exist, partition assignments, who leads each partition, the ISR, topic configs and ACLs. One broker was elected controller and was the only component allowed to write that state. It never touched the data plane — producing and consuming went broker to broker — which is why large clusters ran fine on a modest ZooKeeper ensemble.
+
+</details>
+
+**M4.2** — In KRaft, where does cluster metadata live?
+
+<details>
+<summary>Answer</summary>
+
+In `__cluster_metadata`, a single-partition internal Kafka topic replicated by Raft across the controller nodes. The Raft leader is the active controller; the other controllers are followers holding the same log. Brokers are observers: they fetch that log like consumers and apply the records in order.
+
+</details>
+
+**M4.3** — What is the difference between combined and isolated mode, and how many controllers should a quorum have?
+
+<details>
+<summary>Answer</summary>
+
+`process.roles` sets it. Isolated means a node is either `controller` or `broker`; dedicated controllers are small, cheap and insulated from data-plane load, and this is the production shape. Combined means `broker,controller` on one node — fewer machines, fine for development, with the risk that data-plane load starves the controller. Quorum sizing follows Raft: N controllers tolerate (N-1)/2 failures, so 3 tolerates one and 5 tolerates two. Even numbers buy nothing.
+
+</details>
+
+### Mid
+
+**M4.4** — How do brokers learn about metadata changes in KRaft, and why is that better than the push model?
+
+<details>
+<summary>Answer</summary>
+
+They fetch the metadata log and apply records in order, exactly as a consumer does. Previously the controller pushed updates by RPC, and a broker that missed one had no way to notice — there was no version or offset to compare against, so divergence was possible and undetectable. With a log, each broker has an offset, so being behind becomes a measurable quantity: `MetadataLag` is a number you can graph and alert on. Metadata is eventually consistent with known lag instead of pushed with unknown reliability.
+
+</details>
+
+**M4.5** — Why is controller failover so much faster under KRaft?
+
+<details>
+<summary>Answer</summary>
+
+Under ZooKeeper a new controller had to load the entire cluster state out of ZooKeeper before it could act, so failover time was O(partitions) — minutes on a large cluster, during which no leader elections or topic changes could happen. Under KRaft the standby controllers have been applying the same metadata log all along and already hold the state in memory, so promotion is a Raft election rather than a state transfer. It is milliseconds, and it no longer scales with partition count — which is also what removed the practical ~200k partition ceiling.
+
+</details>
+
+**M4.6** — Why does the metadata log need snapshots?
+
+<details>
+<summary>Answer</summary>
+
+It is an append-only log of every metadata change, so it would grow without bound and replaying it from the beginning would get slower forever. Periodic snapshots capture the complete state at an offset, letting earlier log segments be discarded; a new controller or a far-behind broker loads the latest snapshot and replays only the records after it. It is the same problem log compaction solves for user topics, solved for the control plane.
+
+</details>
+
+### Senior
+
+**M4.7** — Why did Kafka drop ZooKeeper? Answer at the mechanism level.
+
+<details>
+<summary>Answer</summary>
+
+"Operational simplicity" is the consequence, not the reason. The mechanism: controller failover required loading the entire cluster state out of ZooKeeper before the new controller could act, so recovery time scaled with partition count — minutes on a large cluster, with no leader elections possible meanwhile — and that put a practical ceiling of roughly 200k partitions on a cluster, set by failover time rather than by disk or throughput. Metadata propagation was also an RPC push with no version or offset, so a broker that missed an update could not detect it. KRaft stores metadata in a Raft-replicated Kafka log, so standby controllers already hold the state and failover is an election rather than a state transfer, and brokers consume metadata as a log with an offset, which turns "behind" from an invisible condition into a measurable one. Removing the second system to operate, secure and upgrade follows from that — it is the benefit, not the design rationale.
+
+</details>
+
+**M4.8** — A cluster is running Kafka 3.4 on ZooKeeper and the team wants to be on 4.x. Plan it.
+
+<details>
+<summary>Answer</summary>
+
+The constraint that shapes everything: 4.0 removed ZooKeeper support outright, so there is **no direct upgrade path**. The cluster must reach a 3.x version that supports migration, complete the KRaft migration there, verify, and only then upgrade to 4.x — two separate changes that must not be combined. Shape: upgrade 3.4 to a late 3.x on ZooKeeper first, since mixing a version upgrade with a metadata-plane migration makes any failure ambiguous. Then provision the controller quorum, start it in migration mode, let it copy metadata out of ZooKeeper, roll brokers into KRaft mode one at a time, and run in dual-write long enough to be confident before finalising — finalisation is the irreversible step, and the rollback plan exists only before it. Verify with `kafka-metadata-quorum.sh`, by watching metadata lag across brokers, and by confirming `ActiveControllerCount` is exactly 1. Only then do the 4.x upgrade. The thing to say that shows judgment: the risk is not the migration mechanics, it is combining two changes so that a problem cannot be attributed to either.
+
+</details>
+
+**M4.9** — ActiveControllerCount is 2 across the cluster. What does that mean and how bad is it?
+
+<details>
+<summary>Answer</summary>
+
+Exactly one node should report 1 and all others 0, so a cluster-wide sum of 2 means two nodes each believe they are the active controller — split brain in the control plane. Raft is designed to make this impossible, since becoming leader requires a majority of the quorum and two leaders in the same epoch cannot both have one, so the realistic explanations are a partial network partition where a stale leader has not yet learned it was superseded, a metrics-collection artifact summing across a window during an election, or a node that has been excluded from the quorum but still reports its old state. Severity depends on whether both are accepting writes: metadata writes go through Raft, so a stale leader cannot commit without a majority, which means genuine divergent metadata is unlikely and the real exposure is confusion and delayed elections rather than corruption. Diagnose with `kafka-metadata-quorum.sh --describe --status` from several nodes — the quorum's own view of leader and epoch is authoritative, where the per-node metric is only that node's belief. A brief 2 during an election is noise; a sustained 2 is a partition to find.
+
+</details>
+
+**M4.10** — Does KRaft change the durability story from M3 at all?
+
+<details>
+<summary>Answer</summary>
+
+For user data, no — partition replication, ISR, `acks` and `min.insync.replicas` are unchanged, and KRaft is the control plane only. What changes is the failure behaviour *around* durability. Losing the controller quorum does not lose data or stop in-flight produce and consume on existing leaders, but it does stop every metadata operation: no leader elections, no ISR changes being recorded, no topic creation, no broker joining. So a partition leader failing while the quorum is down means that partition stays leaderless until the quorum returns — the data plane keeps running on what it already knows and cannot recover from anything new. The faster failover matters here for the same reason: under ZooKeeper, a controller failover window of minutes was a window in which no partition could recover from a broker failure, so the two failure modes compounded. Being able to separate "the data plane is unaffected" from "recovery is frozen" is the answer; treating controller loss as either harmless or catastrophic are both wrong.
+
+</details>
