@@ -223,9 +223,14 @@ pre .c{color:var(--muted)}
     <a class="done" href="#a-m4"><span class="n">↳</span><span>Model answers</span></a>
   </nav>
 
+  <nav>
+    <a class="wip" href="#m5"><span class="n">M5</span><span>Producer internals</span></a>
+    <a class="wip" href="lab-05-producer.html"><span class="n">↳</span><span>Lab 05 worksheet</span></a>
+    <a class="wip" href="#q-m5"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
   <h3>Not started</h3>
   <nav>
-    <a class="todo" href="#roadmap"><span class="n">M5</span><span>Producer</span></a>
     <a class="todo" href="#roadmap"><span class="n">M6</span><span>Consumer</span></a>
     <a class="todo" href="#roadmap"><span class="n">M7</span><span>Transactions</span></a>
   </nav>
@@ -250,8 +255,8 @@ pre .c{color:var(--muted)}
       <tr><td class="num">M2</td><td>Log segments, indexes, page cache, zero-copy, retention, compaction, tiered storage</td><td><code>done</code></td></tr>
       <tr><td rowspan="2">B · Core mechanics</td><td class="num">M3</td><td>Replication, ISR, LEO vs high watermark, unclean leader election, data-loss matrix</td><td><code>done</code></td></tr>
       <tr><td class="num">M4</td><td>KRaft: quorum controller, metadata log, why ZooKeeper had to go</td><td><code>done</code></td></tr>
-      <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td>next</td></tr>
-      <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td>—</td></tr>
+      <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td><code>in progress</code></td></tr>
+      <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td>next</td></tr>
       <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td>—</td></tr>
       <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td>—</td></tr>
       <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td>—</td></tr>
@@ -849,6 +854,127 @@ acks                 = all   <span class="c"># producer waits for the whole ISR<
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Does KRaft change the durability story from M3 at all?</span></label></li>
   </ul>
   <p class="qmeta" data-count-for="m4-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 5</p>
+  <h1>Producer internals</h1>
+  <p class="lede">What actually happens between <code>send()</code> returning and the record reaching a log — and why the idempotent producer is the first thing in this course that is genuinely subtle.</p>
+
+  <h2 id="m5">The path of one record</h2>
+  <p><code>send()</code> does not send anything. It is asynchronous, returns a future, and hands the record to a buffer that another thread drains.</p>
+<pre>send(record)
+  → serializer            key and value to bytes
+  → partitioner           pick a partition
+  → RecordAccumulator     append to that partition's current batch, in memory
+  → <span class="c">[returns]</span>            the future is not yet complete
+      ⋮
+  Sender thread           drains ready batches, groups them per broker,
+                          sends one request per broker, handles the response,
+                          completes the futures and fires the callbacks</pre>
+  <p>Two consequences fall out immediately. A callback runs on the <strong>Sender thread</strong>, so blocking in it stalls all sending for that producer. And a producer that has not been flushed or closed can lose everything still sitting in the accumulator — which is why <code>close()</code> matters and why a container killed with SIGKILL mid-batch loses records that <code>send()</code> appeared to accept.</p>
+
+  <h3>The accumulator is a memory pool, and it can block you</h3>
+  <p><code>buffer.memory</code> (default 32 MiB) is the total memory for all unsent batches. When it is exhausted — the broker is slow, a partition's leader is unavailable, the application produces faster than the network drains — <code>send()</code> stops being asynchronous and <strong>blocks</strong> for up to <code>max.block.ms</code> (default 60 s), then throws.</p>
+  <div class="callout">
+    <span class="tag">The symptom nobody attributes correctly</span>
+    <p>"Our service got slow and we don't know why" is frequently a producer blocked on <code>buffer.memory</code>, propagating broker backpressure into application latency through a call everyone assumes is non-blocking. The giveaway is that request latency rises in a service that is doing no more work than usual. <code>max.block.ms</code> also covers waiting for topic metadata, so a producer writing to a topic that does not exist blocks the same way.</p>
+  </div>
+
+  <h3>Batching: the two settings and the thing people get wrong</h3>
+  <ul>
+    <li><code>batch.size</code> (16 KiB) — maximum bytes <strong>per partition</strong> in one batch. Not a global size, and not a count.</li>
+    <li><code>linger.ms</code> (0 in the Java client) — how long to wait for more records before sending a partially full batch.</li>
+  </ul>
+  <p>A batch goes when it is full <em>or</em> linger expires. The part that surprises people: <strong><code>linger.ms=0</code> still batches.</strong> While a request is in flight to a broker, records for that broker keep accumulating, and the next request takes everything that arrived meanwhile. Under load you get large batches with zero configured linger — batching is driven by the in-flight window, not only by the timer. Raising <code>linger.ms</code> adds a latency floor to get bigger batches at low load, where there is nothing in flight to accumulate behind.</p>
+  <p>This matters beyond throughput: compression is applied <strong>per batch</strong>, so bigger batches compress better. <code>linger.ms</code> is also a storage-cost setting, and the M2 point that the broker stores exactly the bytes the producer framed is what makes that true end to end.</p>
+
+  <h3>Compression</h3>
+  <div class="scroll"><table>
+    <thead><tr><th><code>compression.type</code></th><th>Use when</th></tr></thead>
+    <tbody>
+      <tr><td><code>lz4</code></td><td>Fastest; the usual default choice when CPU matters more than bytes</td></tr>
+      <tr><td><code>zstd</code></td><td>Best ratio at reasonable CPU; usually the right answer for storage and cross-AZ bandwidth cost</td></tr>
+      <tr><td><code>snappy</code></td><td>Middle ground, widely deployed historically</td></tr>
+      <tr><td><code>gzip</code></td><td>Best ratio on old clients, significant CPU — rarely the right pick now</td></tr>
+    </tbody>
+  </table></div>
+  <p>Leave the <em>topic</em> at <code>compression.type=producer</code> so the broker stores the batch untouched. Setting a different codec on the topic forces decompress and recompress on every batch, which costs broker CPU and loses zero-copy — the M2 point, arriving from the producer side.</p>
+
+  <h3>The partitioner changed, and the old answer is now wrong</h3>
+  <p>With a key, the partition is <code>murmur2(key) % partitions</code> — unchanged since M1. With a null key:</p>
+  <ul>
+    <li><strong>Before 2.4:</strong> round-robin per record, which spread a small number of records across every partition and produced many tiny batches.</li>
+    <li><strong>2.4 (KIP-480):</strong> the <strong>sticky partitioner</strong> — fill one partition's batch, then switch. Far fewer, far larger batches.</li>
+    <li><strong>3.3 (KIP-794):</strong> the <strong>strictly uniform sticky partitioner</strong>. The 2.4 version allocated batches equally but, because slow brokers drain slower, could send <em>more bytes</em> to the brokers least able to take them. The new default assigns by how much each partition has actually accepted, and with <code>partitioner.adaptive.partitioning.enable</code> it steers away from slow brokers. <code>DefaultPartitioner</code> is deprecated; leave <code>partitioner.class</code> unset to get the current behaviour.</li>
+  </ul>
+  <p>Knowing all three, and that the answer changed twice, is the kind of detail that marks someone who has followed Kafka rather than learned it once.</p>
+
+  <h2>Retries, timeouts and ordering</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Setting</th><th>Java default</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>retries</code></td><td><code>Integer.MAX_VALUE</code></td><td>Effectively unbounded — it is <strong>not</strong> what limits retrying</td></tr>
+      <tr><td><code>delivery.timeout.ms</code></td><td>120 000</td><td><strong>The real bound.</strong> Total time from <code>send()</code> to success or failure, retries included</td></tr>
+      <tr><td><code>request.timeout.ms</code></td><td>30 000</td><td>How long to wait for one response before retrying it</td></tr>
+      <tr><td><code>retry.backoff.ms</code></td><td>100</td><td>Pause between attempts</td></tr>
+      <tr><td><code>max.in.flight.requests.per.connection</code></td><td>5</td><td>Unacknowledged requests per connection — and the reordering risk</td></tr>
+    </tbody>
+  </table></div>
+  <p>Tuning <code>retries</code> is the classic mistake: it has not been the limit since <code>delivery.timeout.ms</code> was introduced. If you want a producer to give up after 10 seconds, that is the setting to change.</p>
+  <p>And the M1 point, now with its mechanism: a retry reorders only when <code>max.in.flight &gt; 1</code>, because request 2 can succeed while request 1 is being retried. <code>max.in.flight=1</code> is safe and slow. The real fix is idempotence.</p>
+
+  <h2>The idempotent producer</h2>
+  <p><code>enable.idempotence=true</code> — the default in the Java client since 3.0 (KIP-679), along with <code>acks=all</code>. The mechanism:</p>
+  <ul>
+    <li>The producer requests a <strong>producer id</strong> (PID) and an <strong>epoch</strong> from a broker.</li>
+    <li>Every batch carries the PID, the epoch, and a <strong>sequence number per partition</strong>, incrementing by batch.</li>
+    <li>The broker keeps the last sequence number per (PID, partition). A batch whose sequence it has already seen is <strong>acknowledged and discarded</strong> — the duplicate never reaches the log. A batch arriving ahead of the expected sequence is rejected with <code>OutOfOrderSequenceException</code>.</li>
+  </ul>
+  <p>So the broker both deduplicates and enforces order, which is why idempotence makes <code>max.in.flight</code> up to 5 safe instead of forcing it to 1: out-of-order arrivals are rejected and retried in order rather than being written in the wrong order.</p>
+  <p>Those are the <code>producerId</code> and sequence fields visible in <code>kafka-dump-log.sh</code> since lab 01 — this is what they were for.</p>
+
+  <div class="callout warn">
+    <span class="tag">What idempotence does not do</span>
+    <p><strong>It does not survive a producer restart.</strong> A new producer instance gets a new PID, so the broker has no way to recognise records the previous instance already wrote. Retry after a crash duplicates. Idempotence is per producer session.</p>
+    <p><strong>It is not cross-partition or cross-topic atomicity.</strong> Two records to two partitions can still end with one written and one not. That is transactions, and it is M7.</p>
+    <p><strong>It is not end-to-end exactly-once.</strong> It removes duplicates introduced by producer <em>retries</em>. An application that calls <code>send()</code> twice sends two records, and the broker is right to store both.</p>
+    <p>The honest one-liner: <em>idempotence makes a retry safe, not a system exactly-once.</em></p>
+  </div>
+
+  <h2>Two more things that bite</h2>
+  <p><strong>Record size has two limits and they are set in different places.</strong> <code>max.request.size</code> (producer, 1 MiB) and <code>message.max.bytes</code> (broker/topic). Raise one without the other and the failure appears at whichever is lower — and the broker-side rejection arrives as a confusing error after the record has crossed the network. Consumers have <code>fetch.max.bytes</code> and <code>max.partition.fetch.bytes</code> to match; a message too large for a consumer to fetch is a stall, not an error.</p>
+  <p><strong>Errors come in two kinds.</strong> Retriable — <code>NotLeaderOrFollower</code>, <code>NotEnoughReplicas</code>, timeouts — the client handles them within <code>delivery.timeout.ms</code>. Non-retriable — <code>RecordTooLarge</code>, serialization failures, authorization — fail immediately and reach your callback. Code that treats every callback error the same either retries what can never succeed or drops what would have.</p>
+
+  <h2>Tuning, as one table</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Goal</th><th>Move</th><th>Give up</th></tr></thead>
+    <tbody>
+      <tr><td>Throughput</td><td><code>linger.ms</code> 10-100, <code>batch.size</code> up, <code>compression.type=zstd</code></td><td>Latency floor equal to linger</td></tr>
+      <tr><td>Latency</td><td><code>linger.ms=0</code>, smaller batches, <code>lz4</code> or none</td><td>Throughput, bandwidth, storage</td></tr>
+      <tr><td>Durability</td><td><code>acks=all</code>, idempotence, <code>min.insync.replicas=2</code></td><td>A replication round-trip per write</td></tr>
+      <tr><td>Strict ordering</td><td>Key by entity, idempotence on</td><td>Nothing — this is free, and is why it is the default</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2 id="lab05">Lab 05</h2>
+  <p><strong><a href="lab-05-producer.html">Open the step-by-step worksheet →</a></strong> — six steps: watch <code>linger.ms</code> change the batch count on disk, compare three compression codecs by bytes written, exhaust <code>buffer.memory</code> and time the block, find the PID and sequence numbers that idempotence adds, watch retries burn through <code>delivery.timeout.ms</code> against a dead broker, and hit both record-size limits.</p>
+  <p>The lab also surfaces something worth knowing in itself: the Python client is <code>librdkafka</code>, and <strong>its defaults differ from the Java client's</strong> — <code>linger.ms</code> is 5 rather than 0, and <code>enable.idempotence</code> is off rather than on. Interview answers quote Java defaults; your code may not be running them.</p>
+
+    <h2 id="q-m5">Interview questions — module 5</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m5-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>What happens when you call send()?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What do batch.size and linger.ms control?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>Which compression codec would you pick, and why does it belong on the producer rather than the topic?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Does linger.ms=0 mean no batching?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>A service using a Kafka producer gets slow, with no increase in its own workload. What would you check first?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Someone sets retries=3 to make the producer give up quickly. What actually happens?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Explain the idempotent producer's mechanism, and say precisely what it does not give you.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Trace how the null-key partitioner has changed, and why it changed twice.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A producer reports RecordTooLargeException for some records but not others, intermittently. Diagnose it.</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>You need the lowest possible end-to-end latency from a producer. What do you change, and what is the floor you cannot get past?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m5-questions">0 / 10</p>
 
 
   <h2 id="a-m0">Model answers — module 0</h2>

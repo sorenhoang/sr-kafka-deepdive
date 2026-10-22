@@ -1,0 +1,217 @@
+  <p class="backlink"><a href="index.html">← Kafka Deep Dive</a></p>
+  <p class="eyebrow">Module 5 · lab worksheet</p>
+  <h1>Lab 05 — Producer internals</h1>
+  <p class="lede">Six experiments about what happens before the broker sees a byte. Every one of them is measurable on disk or on the clock, which is the point: producer tuning is full of folklore, and these numbers are yours.</p>
+  <p class="qmeta">Expect 45-60 minutes. One broker on port 9092 — stop lab 02 first.</p>
+
+  <ul class="labtrack qlist" data-store="lab05-steps" style="margin:22px 0">
+    <li><label><input type="checkbox" data-q="1"><span>1 · linger.ms and batch count on disk</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span>2 · three codecs, bytes written</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span>3 · exhaust the buffer, time the block</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span>4 · what idempotence writes</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span>5 · retries vs delivery.timeout.ms</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span>6 · the two size limits</span></label></li>
+  </ul>
+
+  <h2>Setup</h2>
+<pre>cd labs/lab05-producer
+docker compose up -d &amp;&amp; docker compose ps
+python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements.txt
+cd scripts</pre>
+
+  <div class="callout warn">
+    <span class="tag">Read this before trusting any number here</span>
+    <p>The Python client is <strong>librdkafka</strong>, and several defaults differ from the Java client that interview answers quote: <code>linger.ms</code> is <strong>5</strong> not 0, <code>enable.idempotence</code> is <strong>off</strong> not on, and the producer's record-size cap is called <code>message.max.bytes</code> rather than <code>max.request.size</code>. Every script sets what it depends on explicitly. This is worth knowing in itself — "the default is X" is a statement about a client, not about Kafka.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 1</span>linger.ms, and what lands on disk</h3>
+    <p><strong>Proves:</strong> batching is real and measurable — and that <code>linger.ms=0</code> still batches.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>2000 records of 200 B, once with <code>linger.ms=0</code> and once with 50. How many <em>batches</em> do you expect on disk in each case — 2000 and a handful, or something else? Write both numbers down.</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>for t in lab05.linger0 lab05.linger50; do
+  docker exec lab05-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+    --create --topic $t --partitions 1 --replication-factor 1
+done
+
+python3 01_batching.py lab05.linger0  0
+python3 01_batching.py lab05.linger50 50
+
+for t in lab05.linger0 lab05.linger50; do
+  printf "%s batches: " "$t"
+  docker exec lab05-kafka /opt/kafka/bin/kafka-dump-log.sh --print-data-log \
+    --files /tmp/kraft-combined-logs/$t-0/00000000000000000000.log | grep -c baseOffset
+done</pre>
+
+    <h4>Expected</h4>
+    <p>Far fewer than 2000 batches in <em>both</em> cases. <code>linger.ms=50</code> produces fewer still, but <code>linger.ms=0</code> is nowhere near one record per batch.</p>
+
+    <h4>Why</h4>
+    <p>This is the part people get wrong. <code>linger.ms=0</code> does not mean "send each record immediately" — it means "do not <em>wait</em>". While a request is in flight to the broker, records keep accumulating in the accumulator, and the next request takes everything that arrived meanwhile. Under load, batching is driven by the <strong>in-flight window</strong>, not by the timer.</p>
+    <p>So what does <code>linger.ms</code> actually buy? Bigger batches <em>at low load</em>, where there is nothing in flight to accumulate behind and each record would otherwise go alone. It is a latency floor traded for batch size exactly when traffic is thin.</p>
+    <p>Look at a batch header in the dump: the <code>count:</code> field is records in that batch. That number, not the record count, is what the broker handles as one unit.</p>
+
+    <h4>Check yourself</h4>
+    <p>Your producer sends 10 records a second in bursts of one. Does raising <code>linger.ms</code> to 50 help throughput, latency, storage, or none of them? Now the same question at 50,000 records a second.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 2</span>Three codecs, measured in bytes</h3>
+    <p><strong>Proves:</strong> compression is per batch, and the choice is a real number rather than a preference.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>5000 copies of the same ~120-byte JSON record. Roughly how much disk does <code>none</code> use? And what ratio do you expect from <code>zstd</code> on data this repetitive — 2×, 5×, 20×?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>for c in none lz4 zstd; do
+  docker exec lab05-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+    --create --topic lab05.comp-$c --partitions 1 --replication-factor 1
+  python3 02_compression.py $c
+done
+
+docker exec lab05-kafka du -sh /tmp/kraft-combined-logs/lab05.comp-*/</pre>
+
+    <h4>Expected</h4>
+    <p>A large gap between <code>none</code> and either codec, and a smaller one between <code>lz4</code> and <code>zstd</code>. The exact ratios depend on your payload; identical repeated records compress absurdly well, so treat the direction as the lesson and the magnitude as specific to this data.</p>
+
+    <h4>Why</h4>
+    <p>Compression applies to the <strong>batch</strong>, so step 1 and step 2 are the same lever: bigger batches compress better, which means <code>linger.ms</code> is a storage-cost setting as much as a latency one. A producer with <code>linger.ms=0</code> at low load pays twice — more requests and worse ratios.</p>
+    <p>And from M2: the broker stores these bytes <em>exactly as framed</em>, as long as the topic is left at <code>compression.type=producer</code>. Set a codec on the topic instead and the broker decompresses and recompresses every batch — paying CPU and losing zero-copy. Compression belongs on the producer.</p>
+
+    <h4>Check yourself</h4>
+    <p>Your cross-AZ replication bill is the problem, not disk. Does switching from <code>lz4</code> to <code>zstd</code> help? (Think about what crosses the AZ boundary and in what form.)</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 3</span>Exhaust the buffer and time the block</h3>
+    <p><strong>Proves:</strong> <code>send()</code> is asynchronous until it is not.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>The producer buffer is capped at 500 messages. You produce 20,000 as fast as Python can. What does <code>send()</code> do when the buffer is full — drop, throw immediately, or something else?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>python3 03_buffer_block.py
+
+<span class="c"># then the extreme version, with nothing draining the buffer at all</span>
+docker stop lab05-kafka
+python3 03_buffer_block.py
+docker start lab05-kafka</pre>
+
+    <h4>Expected</h4>
+    <p>Lines reporting <code>send() blocked NNNms</code>, then a <code>BufferError</code> once <code>max.block.ms</code> is exceeded. With the broker stopped, it blocks almost immediately and gives up quickly.</p>
+
+    <h4>Why</h4>
+    <p>The accumulator is a fixed memory pool — <code>buffer.memory</code> in the Java client, 32 MiB by default. When it fills, <code>send()</code> blocks for up to <code>max.block.ms</code> (60 s by default) and then throws. It does not drop and it does not grow.</p>
+    <p>That makes it a backpressure mechanism, and it is the most commonly misdiagnosed symptom in this whole course: <strong>"the service got slow and we don't know why"</strong> is frequently a producer blocked on buffer memory, propagating broker backpressure into application latency through a call everyone assumes returns instantly. The tell is request latency rising in a service doing no more work than usual.</p>
+    <p>One more trap: <code>max.block.ms</code> also covers waiting for topic metadata. A producer writing to a topic that does not exist blocks in exactly the same way, with a completely different cause.</p>
+
+    <h4>Check yourself</h4>
+    <p>A service has a 200 ms SLA and a producer with default settings. A broker becomes slow for 90 seconds. What does the service's p99 look like, and which setting would you change to make the failure fast instead of slow?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 4</span>What idempotence writes into the log</h3>
+    <p><strong>Proves:</strong> the PID and sequence numbers you have been seeing since lab 01 are the dedupe mechanism.</p>
+
+    <h4>Run</h4>
+<pre>python3 04_idempotence.py on
+python3 04_idempotence.py off
+
+for m in on off; do
+  echo "=== idempotence $m ==="
+  docker exec lab05-kafka /opt/kafka/bin/kafka-dump-log.sh --print-data-log \
+    --files /tmp/kraft-combined-logs/lab05.idem-$m-0/00000000000000000000.log | head -4
+done</pre>
+
+    <h4>Expected</h4>
+    <p>With idempotence on: a real <code>producerId</code>, a <code>producerEpoch</code>, and <code>sequence</code> values that increase batch by batch. With it off: <code>producerId: -1</code> and <code>sequence: -1</code>.</p>
+
+    <h4>Why</h4>
+    <p>The broker keeps the last sequence number per <code>(producerId, partition)</code>. A batch whose sequence it has already seen is acknowledged and <strong>discarded</strong> — the duplicate never reaches the log. A batch arriving ahead of the expected sequence is rejected with <code>OutOfOrderSequenceException</code>. So the broker enforces dedupe and ordering together, which is precisely why idempotence makes <code>max.in.flight</code> up to 5 safe instead of forcing it to 1.</p>
+    <p>With <code>producerId: -1</code> the broker has nothing to compare against. A retried batch is simply a new batch, written again.</p>
+    <p>And the limit worth saying out loud: the PID belongs to a <strong>producer session</strong>. Restart the process and it gets a new one, so the broker cannot recognise anything the previous instance wrote. Idempotence makes a retry safe; it does not make a crash-and-replay safe. That gap is what transactions close, in M7.</p>
+
+    <h4>Check yourself</h4>
+    <p>Your service produces a record, crashes before the response arrives, restarts, and produces the same record again. How many copies are in the log, and why does idempotence not help?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 5</span>retries is not the limit</h3>
+    <p><strong>Proves:</strong> <code>delivery.timeout.ms</code> bounds the attempt; <code>retries</code> mostly does not.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p><code>retries=3</code>, <code>retry.backoff.ms=200</code>, <code>delivery.timeout.ms=8000</code>, and the broker is down. How long until the callback reports failure — under a second, or about eight?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>docker stop lab05-kafka
+python3 05_retry_timeout.py
+docker start lab05-kafka</pre>
+
+    <h4>Expected</h4>
+    <p>About eight seconds. Three retries at 200 ms of backoff would be well under one.</p>
+
+    <h4>Why</h4>
+    <p><code>retries</code> defaults to <code>Integer.MAX_VALUE</code> and has not been the practical limit since <code>delivery.timeout.ms</code> was introduced. The timeout bounds the <em>whole</em> attempt — initial send, every retry, every backoff — from <code>send()</code> to a terminal callback.</p>
+    <p>So setting <code>retries=3</code> to "fail fast" does nothing useful, and can do harm: it gives up on a transient leader election that would have resolved in two seconds, while the surrounding timeout structure still governs how long the caller waits. If you want the producer to give up after ten seconds, set <code>delivery.timeout.ms=10000</code>. That is the whole answer.</p>
+
+    <h4>Check yourself</h4>
+    <p>You want at-most-5-second produce latency with no silent loss. Which settings do you change, and what must your application do when the callback reports a timeout? (Note that a timeout is not proof the record was <em>not</em> written.)</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 6</span>Two size limits, in two places</h3>
+    <p><strong>Proves:</strong> raising one limit moves the failure rather than removing it.</p>
+
+    <h4>Run</h4>
+<pre>docker exec lab05-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+  --create --topic lab05.size --partitions 1 --replication-factor 1
+
+python3 06_too_large.py 2048</pre>
+
+    <h4>Expected</h4>
+    <p>With the client limit at 1 MB, a 2 MiB record is rejected <em>before leaving the process</em>. With the client limit at 4 MB, the record crosses the network and the <strong>broker</strong> rejects it, because <code>message.max.bytes</code> is still ~1 MiB.</p>
+
+    <h4>Why</h4>
+    <p>Two independent limits: <code>max.request.size</code> on the producer and <code>message.max.bytes</code> on the broker or topic. Each is checked in its own place, and raising only one relocates the error rather than fixing it — now with a wasted network round trip and a less obvious message.</p>
+    <p>The subtlety that makes this intermittent in production: the limit applies to the <strong>compressed batch</strong>, not the individual record. A record that fits alone can fail when batched with others, and whether it does depends on timing and on how well that batch happened to compress. Same payload size, different outcome, which is maddening to debug without knowing this.</p>
+    <p>And the consumer side has to match — <code>fetch.max.bytes</code> and <code>max.partition.fetch.bytes</code>. A message too large for a consumer to fetch does not raise an error; the consumer stalls on it forever. An error is the good outcome.</p>
+
+    <h4>Check yourself</h4>
+    <p>A team needs to send 5 MB payloads. List what has to change, on all three sides — and then give the alternative design a senior engineer would propose first.</p>
+  </div>
+
+  <h2>Tear down</h2>
+<pre>docker compose down -v</pre>
+
+  <h2>When something goes wrong</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+    <tbody>
+      <tr><td>Port 9092 in use</td><td>Lab 02 is still running. <code>cd ../lab02-storage &amp;&amp; docker compose down</code>.</td></tr>
+      <tr><td>Producer refuses to start with idempotence on</td><td>librdkafka enforces <code>acks=all</code> and <code>max.in.flight ≤ 5</code> with idempotence. Do not override them alongside it.</td></tr>
+      <tr><td>Step 1 shows the same batch count for both lingers</td><td>The loop outran the broker, so both were in-flight-bound. Lower the record count or add a <code>time.sleep</code> to simulate low load — which is the condition linger exists for.</td></tr>
+      <tr><td><code>du</code> shows the same size for every codec</td><td>The topics were not recreated between runs, or the data is not compressible. Delete and recreate the three topics.</td></tr>
+      <tr><td>Step 5 fails instantly instead of at 8s</td><td>The broker is still reachable. Confirm with <code>docker ps</code> that the container is stopped.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Done when</h2>
+  <p>You can answer these without looking anything up: why <code>linger.ms=0</code> still batches and what linger actually buys; what blocks when <code>buffer.memory</code> fills and how that shows up in a service; what the PID and sequence number do and what they cannot do; why <code>retries</code> is not the limit; and why raising <code>max.request.size</code> alone does not let you send bigger records.</p>

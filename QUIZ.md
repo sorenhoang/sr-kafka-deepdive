@@ -490,3 +490,102 @@ Exactly one node should report 1 and all others 0, so a cluster-wide sum of 2 me
 For user data, no — partition replication, ISR, `acks` and `min.insync.replicas` are unchanged, and KRaft is the control plane only. What changes is the failure behaviour *around* durability. Losing the controller quorum does not lose data or stop in-flight produce and consume on existing leaders, but it does stop every metadata operation: no leader elections, no ISR changes being recorded, no topic creation, no broker joining. So a partition leader failing while the quorum is down means that partition stays leaderless until the quorum returns — the data plane keeps running on what it already knows and cannot recover from anything new. The faster failover matters here for the same reason: under ZooKeeper, a controller failover window of minutes was a window in which no partition could recover from a broker failure, so the two failure modes compounded. Being able to separate "the data plane is unaffected" from "recovery is frozen" is the answer; treating controller loss as either harmless or catastrophic are both wrong.
 
 </details>
+
+
+## M5 · Producer internals
+
+### Junior
+
+**M5.1** — What happens when you call send()?
+
+<details>
+<summary>Answer</summary>
+
+Nothing is sent. The record is serialized, assigned a partition, appended to an in-memory batch in the RecordAccumulator, and a future is returned. A separate Sender thread drains ready batches, groups them per broker, issues the requests, and completes the futures. Two consequences: callbacks run on the Sender thread, so blocking in one stalls all sending; and a producer killed without `close()` or `flush()` loses whatever is still in the accumulator, even though `send()` appeared to accept it.
+
+</details>
+
+**M5.2** — What do batch.size and linger.ms control?
+
+<details>
+<summary>Answer</summary>
+
+`batch.size` (16 KiB) is the maximum bytes **per partition** in one batch — not a global size and not a record count. `linger.ms` (0 in the Java client) is how long to wait for more records before sending a partially full batch. A batch goes when it is full or linger expires, whichever comes first.
+
+</details>
+
+**M5.3** — Which compression codec would you pick, and why does it belong on the producer rather than the topic?
+
+<details>
+<summary>Answer</summary>
+
+`lz4` when CPU matters most, `zstd` when storage and cross-AZ bandwidth matter — which is usually the right default now; `gzip` is rarely worth its CPU any more. It belongs on the producer because compression is applied per batch before the record is sent, and the broker stores those bytes untouched. Setting a different codec on the topic forces the broker to decompress and recompress every batch, costing CPU and losing zero-copy.
+
+</details>
+
+### Mid
+
+**M5.4** — Does linger.ms=0 mean no batching?
+
+<details>
+<summary>Answer</summary>
+
+No. While a request is in flight to a broker, records keep accumulating, and the next request takes everything that arrived meanwhile — so under load you get large batches with zero configured linger. Batching is driven by the in-flight window, not only by the timer. Raising `linger.ms` buys bigger batches specifically at low load, where there is nothing in flight to accumulate behind, at the cost of a latency floor.
+
+</details>
+
+**M5.5** — A service using a Kafka producer gets slow, with no increase in its own workload. What would you check first?
+
+<details>
+<summary>Answer</summary>
+
+Whether `send()` is blocking on `buffer.memory`. The accumulator is a fixed pool (32 MiB by default); when it fills because the broker is slow, a partition leader is unavailable, or the application outpaces the network, `send()` stops being asynchronous and blocks for up to `max.block.ms` (60 s) before throwing. That propagates broker backpressure straight into application latency through a call everyone assumes is non-blocking. `max.block.ms` also covers waiting for topic metadata, so producing to a topic that does not exist looks identical.
+
+</details>
+
+**M5.6** — Someone sets retries=3 to make the producer give up quickly. What actually happens?
+
+<details>
+<summary>Answer</summary>
+
+Almost nothing they intended. `retries` defaults to `Integer.MAX_VALUE` and has not been the limit since `delivery.timeout.ms` was introduced — that setting (120 s by default) bounds the total time from `send()` to success or failure, retries included. Setting `retries=3` can make things worse by giving up on a transient leader election that would have resolved, while the producer still waits out the timeout structure around it. To give up after ten seconds, set `delivery.timeout.ms=10000`.
+
+</details>
+
+### Senior
+
+**M5.7** — Explain the idempotent producer's mechanism, and say precisely what it does not give you.
+
+<details>
+<summary>Answer</summary>
+
+The producer obtains a **producer id** (PID) and an **epoch**. Every batch carries the PID, the epoch and a **per-partition sequence number**. The broker tracks the last sequence per (PID, partition): a batch whose sequence it has already seen is acknowledged and discarded, so the duplicate never reaches the log, and a batch arriving ahead of the expected sequence is rejected with `OutOfOrderSequenceException`. Because the broker enforces both dedupe and order, `max.in.flight` up to 5 stays safe instead of being forced to 1 — out-of-order arrivals are rejected and retried in order rather than written in the wrong order. What it does **not** give you: it does not survive a producer restart, since a new instance gets a new PID and the broker cannot recognise what the old one wrote, so a crash-and-retry duplicates; it is not cross-partition atomicity, so two records to two partitions can still end with one written and one not — that is transactions; and it is not end-to-end exactly-once, since an application that calls `send()` twice has sent two records and the broker is right to keep both. The line worth having: idempotence makes a retry safe, not a system exactly-once.
+
+</details>
+
+**M5.8** — Trace how the null-key partitioner has changed, and why it changed twice.
+
+<details>
+<summary>Answer</summary>
+
+**Before 2.4** it was round-robin per record, so a modest produce rate spread records across every partition and produced many tiny batches — bad for throughput, bad for compression, and more requests per byte. **2.4 (KIP-480)** introduced the sticky partitioner: fill one partition's batch, send it, then switch. Far fewer and far larger batches for the same traffic. **3.3 (KIP-794)** replaced it with the strictly uniform sticky partitioner, because the 2.4 version allocated *batches* equally while slow brokers drained slower — so a struggling broker received proportionally more bytes, exactly backwards. The current partitioner assigns by how much each partition has actually accepted, and `partitioner.adaptive.partitioning.enable` steers away from slow brokers. `DefaultPartitioner` is deprecated; leaving `partitioner.class` unset gets the current behaviour. The reason this is worth knowing is the second change: the first fix optimised the wrong quantity, and noticing that took production experience rather than design review.
+
+</details>
+
+**M5.9** — A producer reports RecordTooLargeException for some records but not others, intermittently. Diagnose it.
+
+<details>
+<summary>Answer</summary>
+
+Two limits in different places, and the error can come from either. `max.request.size` (producer, 1 MiB) is checked client-side and fails immediately. `message.max.bytes` (broker or topic) is checked after the record crosses the network. If only one was raised, failures appear at whichever is lower — and a topic-level override means it can differ per topic, which is one source of the intermittency. The other is that the limit applies to the **compressed batch**, not the individual record, so a record that fits alone can fail when batched with others, and whether it does depends on timing and on how well that particular batch compressed. That is why it looks intermittent for the same payload size. Check both settings and any topic override, compare against the compressed batch size rather than the record size, and remember the consumer side: `fetch.max.bytes` and `max.partition.fetch.bytes` must also accommodate it, or the symptom moves from an error to a consumer that silently stalls on a message it cannot fetch.
+
+</details>
+
+**M5.10** — You need the lowest possible end-to-end latency from a producer. What do you change, and what is the floor you cannot get past?
+
+<details>
+<summary>Answer</summary>
+
+Producer side: `linger.ms=0`, a smaller `batch.size` so nothing waits to fill, `compression.type=none` or `lz4`, and keep idempotence on since it costs nothing in latency. Avoid the mistakes that add latency while looking like tuning: a large `buffer.memory` does not help latency and hides backpressure, and `max.in.flight=1` to "be safe" serialises requests and adds a round-trip per batch for a guarantee idempotence already provides. The floor is not on the producer at all. With `acks=all` the leader cannot respond until every in-sync replica has the record, so a replication round-trip is in the critical path — and from M3, a consumer cannot read past the high watermark, which needs that same round-trip to advance. So end-to-end latency has a hard floor of roughly one replication round-trip plus the consumer's `fetch.max.wait.ms` for an empty fetch. Dropping to `acks=1` removes the first half and buys a silent data-loss window, which is almost never the right trade. The senior move is to say which half of the latency is yours to tune and which is the durability guarantee showing itself, and to ask whether the latency requirement is really end-to-end or just produce-ack — people routinely measure the second and specify the first.
+
+</details>

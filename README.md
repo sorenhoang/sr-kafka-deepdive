@@ -48,7 +48,7 @@ M3 and M4.
 | M2 | Storage internals: segments, page cache, zero-copy, compaction | ready | ✅ | ✅ |
 | M3 | Replication, ISR, LEO vs high watermark, unclean leader election | ready | ✅ | model |
 | M4 | KRaft: quorum controller, metadata log | ready | ✅ | model |
-| M5 | Producer internals, idempotent producer | | | |
+| M5 | Producer internals, idempotent producer | ready | | |
 | M6 | Consumer internals, rebalance, KIP-848 | | | |
 | M7 | Delivery semantics, transactions, exactly-once | | | |
 | M8 | Schema Registry, compatibility, evolution | | | |
@@ -81,6 +81,7 @@ labs/lab02-storage/  single broker; segments, indexes, retention, compaction
 labs/lab03-replication/
                      three brokers you break on purpose; ISR, high watermark, acks
 labs/lab04-kraft/    the metadata log, the controller quorum, controller failover
+labs/lab05-producer/ batching, compression, buffer backpressure, idempotence
 private/             gitignored — raw answers, grades and gap notes, local only
 ```
 

@@ -1,0 +1,37 @@
+# Lab 05 — single-broker KRaft cluster for producer experiments.
+# One broker keeps the variables down: everything observed is the producer's doing.
+# Start:  docker compose up -d
+# Stop:   docker compose down -v
+name: kafka-lab05
+
+services:
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: lab05-kafka
+    ports: ["9092:9092"]
+    environment:
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_LISTENERS: "INTERNAL://:19092,CONTROLLER://:9093,EXTERNAL://:9092"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:19092,EXTERNAL://localhost:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Check retention every 10s instead of the 5-minute default, so the lab does not
+      # make you wait. Production leaves this alone.
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: "10000"
+      # Same for the compaction thread's idle backoff.
+      KAFKA_LOG_CLEANER_BACKOFF_MS: "5000"
+      KAFKA_LOG_CLEANER_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
