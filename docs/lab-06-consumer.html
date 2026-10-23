@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>
+:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}
+img{max-width:100%}
+[hidden]:not([hidden="until-found"]){display:none!important}
+</style>
+<title>Kafka Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@500;700;900&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: sticky module rail on the left, single reading column ~68ch on the right; stacks to one column under 900px */
+:root{
+  --paper:#F2F3EF; --panel:#FBFBF9; --sunk:#E8EAE4;
+  --ink:#1A1D21; --ink-2:#3C434B; --muted:#6B737C;
+  --rule:#D5D8D1; --rule-strong:#B9BEB6;
+  --accent:#1D6B61; --accent-soft:#DCE9E6;
+  --warn:#9E4B18; --warn-soft:#F2E3D8;
+  --font-display:"Chivo","Helvetica Neue",Arial,sans-serif;
+  --font-body:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#15171A; --panel:#1C1F23; --sunk:#23272C;
+  --ink:#E9EBE6; --ink-2:#C3C9CE; --muted:#929AA2;
+  --rule:#2C3137; --rule-strong:#3D444B;
+  --accent:#58B6A7; --accent-soft:#1B312E;
+  --warn:#D98B52; --warn-soft:#33241A;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --paper:#15171A; --panel:#1C1F23; --sunk:#23272C;
+  --ink:#E9EBE6; --ink-2:#C3C9CE; --muted:#929AA2;
+  --rule:#2C3137; --rule-strong:#3D444B;
+  --accent:#58B6A7; --accent-soft:#1B312E;
+  --warn:#D98B52; --warn-soft:#33241A;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:17px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+.shell{display:grid; grid-template-columns:260px minmax(0,1fr); gap:0; max-width:1180px; margin:0 auto}
+
+.rail{
+  border-right:1px solid var(--rule);
+  padding:28px 20px 48px; align-self:start;
+  position:sticky; top:env(safe-area-inset-top,0px);
+  max-height:100vh; overflow-y:auto;
+}
+.brand{font-family:var(--font-display); font-weight:900; font-size:19px; letter-spacing:-.02em; line-height:1.15; margin:0 0 2px}
+.brand span{color:var(--accent)}
+.brand-sub{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:0 0 22px}
+.rail h3{font-family:var(--font-mono); font-size:10px; letter-spacing:.11em; text-transform:uppercase; color:var(--muted); margin:22px 0 8px; font-weight:600}
+.rail nav{display:flex; flex-direction:column; gap:1px}
+.rail nav a{
+  display:flex; gap:9px; align-items:baseline;
+  font-family:var(--font-display); font-size:13.5px; font-weight:500;
+  color:var(--ink-2); text-decoration:none; padding:5px 8px; border-radius:3px; min-width:0;
+}
+.rail nav a:hover{background:var(--sunk); color:var(--ink)}
+.rail nav a .n{font-family:var(--font-mono); font-size:10.5px; color:var(--muted); flex:0 0 22px; font-weight:500}
+.rail nav a.done .n{color:var(--accent)}
+.rail nav a.todo{color:var(--muted)}
+.rail nav a.todo .n{opacity:.6}
+.rail nav a.wip .n{color:var(--warn)}
+.legend i{color:var(--warn); font-style:normal}
+.legend{font-family:var(--font-mono); font-size:10px; color:var(--muted); margin-top:20px; line-height:1.9; border-top:1px solid var(--rule); padding-top:14px}
+.legend b{color:var(--accent); font-weight:500}
+.repo-link{font-family:var(--font-mono); font-size:10px; margin-top:12px}
+
+main{padding:40px 44px 96px; min-width:0}
+main.solo{max-width:900px; margin:0 auto; padding:40px 24px 96px}
+.eyebrow{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.11em; text-transform:uppercase; color:var(--accent); font-weight:600; margin:0 0 10px}
+h1{font-family:var(--font-display); font-weight:900; font-size:clamp(30px,4.6vw,44px); line-height:1.06; letter-spacing:-.025em; margin:0 0 14px; text-wrap:balance}
+.lede{font-size:19px; color:var(--ink-2); max-width:62ch; margin:0 0 8px}
+h2{font-family:var(--font-display); font-weight:700; font-size:25px; letter-spacing:-.015em; margin:56px 0 4px; padding-top:22px; border-top:2px solid var(--ink); text-wrap:balance}
+h3{font-family:var(--font-display); font-weight:700; font-size:18px; letter-spacing:-.01em; margin:34px 0 6px; text-wrap:balance}
+p{margin:10px 0; max-width:68ch}
+a{color:var(--accent)}
+code{font-family:var(--font-mono); font-size:.86em; background:var(--sunk); padding:1.5px 5px; border-radius:3px}
+strong{font-weight:600}
+ul,ol{max-width:68ch; padding-left:22px; margin:10px 0}
+li{margin:5px 0}
+hr{border:0; border-top:1px solid var(--rule); margin:40px 0}
+
+.scroll{overflow-x:auto; margin:18px 0; border:1px solid var(--rule); border-radius:5px; background:var(--panel)}
+table{border-collapse:collapse; width:100%; font-size:14.5px; font-family:var(--font-display)}
+th,td{text-align:left; padding:9px 13px; border-bottom:1px solid var(--rule); vertical-align:top}
+thead th{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); font-weight:600; background:var(--sunk); white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+td code{background:transparent; padding:0; color:var(--accent)}
+.num{font-variant-numeric:tabular-nums; font-family:var(--font-mono)}
+
+pre{
+  font-family:var(--font-mono); font-size:13px; line-height:1.62;
+  background:var(--panel); border:1px solid var(--rule); border-left:2px solid var(--accent);
+  border-radius:4px; padding:14px 16px; overflow-x:auto; margin:16px 0; color:var(--ink-2);
+}
+pre b{color:var(--ink); font-weight:600}
+pre .c{color:var(--muted)}
+
+.callout{border:1px solid var(--rule); border-left:3px solid var(--accent); background:var(--panel); border-radius:4px; padding:14px 18px; margin:20px 0}
+.callout.warn{border-left-color:var(--warn); background:var(--warn-soft)}
+.callout .tag{font-family:var(--font-mono); font-size:10px; letter-spacing:.09em; text-transform:uppercase; font-weight:600; color:var(--accent); display:block; margin-bottom:5px}
+.callout.warn .tag{color:var(--warn)}
+.callout p{margin:5px 0; max-width:62ch}
+.callout :first-child{margin-top:0} .callout :last-child{margin-bottom:0}
+
+.logstrip{display:flex; flex-direction:column; gap:7px; margin:20px 0; font-family:var(--font-mono); font-size:11.5px}
+.logrow{display:flex; align-items:center; gap:9px; min-width:0}
+.logrow .plabel{flex:0 0 72px; color:var(--muted); letter-spacing:.04em}
+.cells{display:flex; gap:3px; flex-wrap:wrap; min-width:0}
+.cell{width:30px; height:26px; display:grid; place-items:center; background:var(--sunk); border:1px solid var(--rule); border-radius:2px; color:var(--ink-2); font-size:10.5px; font-variant-numeric:tabular-nums}
+.cell.hw{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600}
+.cell.empty{background:transparent; border-style:dashed; color:transparent}
+.logrow .owner{flex:0 0 auto; color:var(--accent); font-size:10.5px; letter-spacing:.04em}
+.logrow .owner.idle{color:var(--warn)}
+
+.tool{border:1px solid var(--rule-strong); border-radius:6px; background:var(--panel); padding:20px; margin:24px 0}
+.tool-head{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); font-weight:600; margin-bottom:14px}
+.fields{display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end}
+.field{display:flex; flex-direction:column; gap:5px; min-width:0}
+.field label{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted)}
+.field input{
+  font-family:var(--font-mono); font-size:14px; padding:7px 10px; width:150px; max-width:100%;
+  background:var(--paper); color:var(--ink); border:1px solid var(--rule-strong); border-radius:3px;
+}
+.field input:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+.field input[type=number]{width:90px}
+.result{margin-top:18px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; font-family:var(--font-mono); font-size:13px}
+.chip{border:1px solid var(--rule-strong); border-radius:3px; padding:6px 11px; background:var(--paper); font-variant-numeric:tabular-nums}
+.chip b{color:var(--accent); font-weight:600}
+.verdict{font-family:var(--font-display); font-size:14px; font-weight:500; margin-top:12px}
+.verdict.moved{color:var(--warn)}
+.verdict.kept{color:var(--accent)}
+
+.qlist{list-style:none; padding:0; margin:18px 0; max-width:none}
+.qlist li{border:1px solid var(--rule); border-radius:5px; background:var(--panel); margin:7px 0; padding:0}
+.qlist label{display:flex; gap:12px; align-items:flex-start; padding:12px 15px; cursor:pointer}
+.qlist input{margin:4px 0 0; accent-color:var(--accent); flex:0 0 auto; width:15px; height:15px}
+.qlist .qtext{font-size:15.5px; min-width:0}
+.qlist .lvl{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); display:block; margin-bottom:3px}
+.qlist .lvl.hard{color:var(--warn)}
+.qlist input:checked + .qtext{color:var(--muted); text-decoration:line-through var(--rule-strong)}
+.qmeta{font-family:var(--font-mono); font-size:11px; color:var(--muted); margin-top:10px}
+
+/* lab worksheet */
+.step{border:1px solid var(--rule); border-radius:6px; background:var(--panel); padding:0 22px 18px; margin:26px 0}
+.step > h3{display:flex; gap:12px; align-items:baseline; margin:0 -22px 4px; padding:14px 22px; border-bottom:1px solid var(--rule); background:var(--sunk); border-radius:5px 5px 0 0}
+.step > h3 .sn{font-family:var(--font-mono); font-size:11px; color:var(--accent); flex:0 0 auto; letter-spacing:.06em}
+.step h4{font-family:var(--font-mono); font-weight:600; font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:20px 0 4px}
+.step h4.predict{color:var(--warn)}
+.step > :last-child{margin-bottom:0}
+.predict-box{border-left:3px solid var(--warn); background:var(--warn-soft); border-radius:3px; padding:11px 15px; margin:8px 0}
+.predict-box p{margin:4px 0; max-width:62ch}
+.predict-box :first-child{margin-top:0} .predict-box :last-child{margin-bottom:0}
+.labtrack{list-style:none; padding:0; margin:0}
+.labtrack li{border:0; background:transparent; margin:0}
+.labtrack label{display:flex; gap:10px; align-items:center; padding:0; cursor:pointer; font-family:var(--font-mono); font-size:11px; color:var(--muted)}
+.labtrack input{accent-color:var(--accent); width:14px; height:14px; margin:0}
+.labtrack input:checked + span{color:var(--accent)}
+.backlink{font-family:var(--font-mono); font-size:11px; margin:0 0 18px}
+
+@media (max-width:900px){
+  .shell{grid-template-columns:minmax(0,1fr)}
+  .rail{position:static; max-height:none; border-right:0; border-bottom:1px solid var(--rule); padding:26px 20px 22px}
+  .rail nav{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:1px}
+  main{padding:30px 20px 80px}
+  body{font-size:16px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+</style>
+</head>
+<body>
+<main class="solo">
+  <p class="backlink"><a href="index.html">← Kafka Deep Dive</a></p>
+  <p class="eyebrow">Module 6 · lab worksheet</p>
+  <h1>Lab 06 — Consumer internals</h1>
+  <p class="lede">Six experiments on the half of Kafka where incidents actually happen. Step 4 causes a rebalance storm on purpose — doing that once is the cheapest way to recognise one at 3am.</p>
+  <p class="qmeta">Expect 50-70 minutes. Several steps need two or three terminals, each with its own <code>source .venv/bin/activate</code>.</p>
+
+  <ul class="labtrack qlist" data-store="lab06-steps" style="margin:22px 0">
+    <li><label><input type="checkbox" data-q="1"><span>1 · fetch.min.bytes and first-record latency</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span>2 · read __consumer_offsets</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span>3 · measure the auto-commit window</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span>4 · cause a rebalance storm</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span>5 · eager vs cooperative sticky</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span>6 · static membership</span></label></li>
+  </ul>
+
+  <h2>Setup</h2>
+<pre>cd labs/lab06-consumer
+docker compose up -d &amp;&amp; docker compose ps
+
+docker exec lab06-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+  --create --topic lab06.events --partitions 4 --replication-factor 1
+
+python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements.txt
+cd scripts &amp;&amp; python3 00_seed.py 10000</pre>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 1</span>fetch.min.bytes trades latency for batching</h3>
+    <p><strong>Proves:</strong> the fetch is a broker-side wait, not a client-side poll.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>A consumer with <code>fetch.min.bytes=100000</code> and <code>fetch.max.wait.ms=2000</code> is subscribed to a quiet topic. One 16-byte record is produced. How long before the consumer sees it?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>python3 01_fetch_tuning.py 1 500
+python3 01_fetch_tuning.py 100000 2000</pre>
+
+    <h4>Expected</h4>
+<pre>fetch.min.bytes=1       fetch.max.wait.ms=500    first record after      ~5 ms
+fetch.min.bytes=100000  fetch.max.wait.ms=2000   first record after    ~2000 ms</pre>
+
+    <h4>Why</h4>
+    <p>The broker holds the fetch request open until it has <code>fetch.min.bytes</code> to return <em>or</em> <code>fetch.max.wait.ms</code> elapses. One small record satisfies neither condition, so the consumer waits out the full timeout. This is a long-poll, and the latency is on the broker side — no amount of polling faster helps.</p>
+    <p>The practical reading: <code>fetch.min.bytes</code> is a throughput optimisation that costs tail latency exactly when traffic is thin, which is the mirror image of <code>linger.ms</code> on the producer. On a busy topic it is nearly free; on a quiet one it is the dominant latency term.</p>
+
+    <h4>Check yourself</h4>
+    <p>You have a low-volume topic with a 100 ms end-to-end latency requirement. What are the defaults of <code>fetch.min.bytes</code> and <code>fetch.max.wait.ms</code>, and which one would break your SLA if someone "tuned for throughput"?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 2</span>Read the offsets topic directly</h3>
+    <p><strong>Proves:</strong> consumer progress is just records in a compacted Kafka topic.</p>
+
+    <h4>Run</h4>
+<pre>python3 02_autocommit_window.py consume lab06-peek   <span class="c"># Ctrl+C after ~10s</span>
+
+docker exec lab06-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:19092 --describe --group lab06-peek
+
+docker exec lab06-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:19092 --topic __consumer_offsets \
+  --from-beginning --max-messages 10 \
+  --formatter 'kafka.coordinator.group.GroupMetadataManager$OffsetsMessageFormatter'</pre>
+
+    <h4>Expected</h4>
+    <p><code>--describe</code> gives the familiar table: current offset, log end offset, lag, and the member owning each partition. The raw topic shows records keyed by <code>(group, topic, partition)</code> carrying an offset and metadata.</p>
+
+    <h4>Why</h4>
+    <p><code>__consumer_offsets</code> has 50 partitions and is <strong>compacted</strong>, so it converges to the current position per key — exactly the compaction behaviour from M2, applied to consumer progress. The partition a group hashes to also determines its <strong>group coordinator</strong>: the broker leading that partition. That is why a single broker going down can affect some groups' rebalances and not others.</p>
+    <p>Also note what a committed offset means: <strong>the next record the group wants</strong>, not the last one processed. Off by one here and you reprocess or skip exactly one record per commit, forever, with no error.</p>
+
+    <h4>Check yourself</h4>
+    <p><code>offsets.retention.minutes</code> defaults to 7 days. What happens to a batch consumer that runs monthly, and which <code>auto.offset.reset</code> value makes that failure silent?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 3</span>Measure the auto-commit window</h3>
+    <p><strong>Proves:</strong> auto-commit commits what was <em>returned</em>, not what was <em>processed</em>.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>A consumer with auto-commit on processes ~100 records per second and is killed 12 seconds in. On restart, roughly how many records does it see again — 0, a handful, or hundreds?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>python3 02_autocommit_window.py consume lab06-ac1    <span class="c"># Ctrl+C after ~10s</span>
+python3 02_autocommit_window.py recount lab06-ac1</pre>
+
+    <h4>Expected</h4>
+    <p>The second run replays a batch of records the first had already processed — everything since the last 5-second auto-commit tick.</p>
+
+    <h4>Why</h4>
+    <p>Auto-commit fires on a timer, during <code>poll()</code>, and commits the offsets that <code>poll()</code> <strong>returned</strong>. It has no idea whether your code finished with them. So the guarantee is at-least-once with a window of up to <code>auto.commit.interval.ms</code> — a window you did not choose and cannot see in any metric.</p>
+    <p>Worse in the other direction: if <code>poll()</code> returns 500 records and you crash after processing 10, the next poll may still auto-commit all 500 as done, and the remaining 490 are <strong>skipped</strong>. Whether auto-commit over- or under-commits depends on timing, which is the real objection to it.</p>
+    <p>The fix is <code>enable.auto.commit=false</code>, process, then <code>commitSync()</code> — the commit becomes a statement about processing, which is how everyone reads it anyway.</p>
+
+    <h4>Check yourself</h4>
+    <p>Your consumer is idempotent downstream. Is auto-commit now fine? Name the one thing you would still check before leaving it on.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 4</span>Cause a rebalance storm</h3>
+    <p><strong>Proves:</strong> heartbeats and progress are different things, and the group punishes the second.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p><code>max.poll.interval.ms=10000</code>, <code>session.timeout.ms=45000</code>, and the consumer sleeps 12 seconds per batch. The heartbeat thread is healthy the whole time. Does the consumer get evicted — and if so, which timeout fires?</p>
+    </div>
+
+    <h4>Run — two terminals</h4>
+<pre>python3 03_poll_interval.py 12 c1
+python3 03_poll_interval.py 12 c2</pre>
+
+    <h4>Expected</h4>
+    <p>Repeated <code>REVOKED</code> / <code>ASSIGNED</code> churn in both terminals. Each eviction rebalances the whole group, so the <em>other</em> consumer stops too, and the cycle repeats indefinitely.</p>
+
+    <h4>Why</h4>
+    <p><code>session.timeout.ms</code> never fires — the background heartbeat thread is fine, because the process is alive. <code>max.poll.interval.ms</code> exists precisely for this: an application that is alive but not making progress. Exceed it and the coordinator removes the member.</p>
+    <p>Now the self-sustaining part. The eviction rebalances the group, so every consumer stops. Work since the last commit is reprocessed, adding load. The added load makes the next consumer exceed the interval. The group spends more time rebalancing than consuming and <strong>does not recover on its own</strong>.</p>
+    <p><strong>The fix is almost never a bigger timeout.</strong> Lower <code>max.poll.records</code> so each poll-to-poll cycle is shorter and bounded — the timeout measures cycle duration, not throughput — then find out why processing slowed. Raising <code>max.poll.interval.ms</code> to 30 minutes ends the storm by making a genuinely stuck consumer take 30 minutes to detect: a loud failure traded for a slow one.</p>
+
+    <h4>Check yourself</h4>
+    <p>Try it: restart both with <code>python3 03_poll_interval.py 2 c1</code>. The sleep is now under the interval. Which setting did you effectively change, and what would the equivalent production change be?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 5</span>Eager versus cooperative sticky</h3>
+    <p><strong>Proves:</strong> an incremental rebalance revokes only what moves.</p>
+
+    <h4>Run — three terminals, twice</h4>
+<pre><span class="c"># round 1: eager</span>
+python3 05_assignor_compare.py range c1
+python3 05_assignor_compare.py range c2
+<span class="c"># ...then start c3 and watch c1 and c2</span>
+python3 05_assignor_compare.py range c3
+
+<span class="c"># round 2: cooperative, fresh group</span>
+python3 05_assignor_compare.py cooperative-sticky c1
+python3 05_assignor_compare.py cooperative-sticky c2
+python3 05_assignor_compare.py cooperative-sticky c3</pre>
+
+    <h4>Expected</h4>
+    <p>With <code>range</code>, adding the third consumer makes c1 and c2 revoke <strong>every</strong> partition before anything is reassigned. With <code>cooperative-sticky</code>, they revoke only the partitions actually moving to c3 — often one each, sometimes none.</p>
+
+    <h4>Why</h4>
+    <p>Eager rebalancing is stop-the-world by construction: everyone gives everything back, rejoins, waits at a join barrier while one elected consumer computes the assignment, then receives it. Nothing is consumed throughout. Cooperative sticky (KIP-429, 2.4) splits this into two short rounds and revokes only what is moving, so a group that is otherwise healthy keeps consuming while one member joins.</p>
+    <p>The number to carry away is the revoked total printed on exit. On a 4-partition topic the difference is small; on a 200-partition topic with 20 consumers it is the difference between a deploy being invisible and a deploy being an incident.</p>
+    <p>Both of these are still <em>client-side</em> assignment. KIP-848 (GA in 4.0, <code>group.protocol=consumer</code>) moves it to the broker and removes the join barrier entirely — try it if your client build supports it, since client support lags the broker.</p>
+
+    <h4>Check yourself</h4>
+    <p>Cooperative sticky makes rebalances cheaper. Name the situation where the right answer is to have no rebalance at all, and which feature provides that.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 6</span>Static membership</h3>
+    <p><strong>Proves:</strong> a planned restart does not have to cost a rebalance.</p>
+
+    <h4>Run — two terminals</h4>
+<pre><span class="c"># dynamic: no group.instance.id</span>
+python3 04_static_membership.py c1
+python3 04_static_membership.py c2
+<span class="c"># Ctrl+C c2, restart it, watch c1</span>
+
+<span class="c"># static: fresh group, both with instance ids</span>
+python3 04_static_membership.py c1 static-1
+python3 04_static_membership.py c2 static-2
+<span class="c"># Ctrl+C c2, restart within 45s, watch c1</span></pre>
+
+    <h4>Expected</h4>
+    <p>Dynamic: c1 logs <code>REVOKED</code>/<code>ASSIGNED</code> twice — once when c2 leaves, once when it returns. Static: c1 logs <strong>nothing</strong>. The returning member reclaims its own partitions.</p>
+
+    <h4>Why</h4>
+    <p>With <code>group.instance.id</code> set, a member that disappears is not immediately removed from the group — the coordinator holds its assignment until <code>session.timeout.ms</code> expires. Restart inside that window and it resumes its old partitions with no rebalance for anyone.</p>
+    <p>This is what makes rolling deploys of a large consumer group survivable. Without it, a 20-pod rollout is 20 rebalances, each one stopping the entire group. With it, zero — provided each pod has a stable identity, which in Kubernetes means a StatefulSet or an explicitly injected ordinal rather than a random pod name.</p>
+    <p>The trade: a genuinely dead static member is not noticed until <code>session.timeout.ms</code> elapses, so its partitions sit idle for that long. Static membership moves you from "every restart costs a rebalance" to "every crash costs 45 seconds of that partition's throughput" — which is the right trade for a group that deploys often.</p>
+
+    <h4>Check yourself</h4>
+    <p>You set <code>group.instance.id</code> from the pod name in a Deployment, not a StatefulSet. What happens on the next rollout, and why is it worse than not using static membership at all?</p>
+  </div>
+
+  <h2>Tear down</h2>
+<pre>docker compose down -v</pre>
+
+  <h2>When something goes wrong</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+    <tbody>
+      <tr><td>Port 9092 in use</td><td>Lab 02 or 05 is running. <code>docker compose down</code> in those.</td></tr>
+      <tr><td>Step 1 returns instantly for both settings</td><td>The topic still has backlog, so <code>fetch.min.bytes</code> is satisfied at once. Use a fresh topic or consume to the end first.</td></tr>
+      <tr><td>Step 3 replays nothing</td><td>You ran for less than one auto-commit interval, so nothing was committed and the whole run replays — which is the same lesson, more extreme.</td></tr>
+      <tr><td>Step 4 shows no eviction</td><td>Only one consumer and few partitions means poll returns nothing to sleep on. Seed more data, or check the sleep exceeds 10s.</td></tr>
+      <tr><td>Step 6 static restart still rebalances</td><td>The restart took longer than <code>session.timeout.ms</code>, or the two runs used different instance ids. Restart promptly and keep the id identical.</td></tr>
+      <tr><td><code>cooperative-sticky</code> rejected</td><td>Older librdkafka builds do not support it. <code>pip install -U confluent-kafka</code>.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Done when</h2>
+  <p>You can answer these without looking anything up: why a consumer can heartbeat happily and still be evicted; what auto-commit actually commits and both ways it can be wrong; what cooperative sticky changes and what static membership changes, and why they are different problems; and the five different things high consumer lag can mean.</p>
+</main>
+
+<script>
+(function(){
+  "use strict";
+
+  // murmur2, matching org.apache.kafka.common.utils.Utils.murmur2
+  function murmur2(bytes){
+    var seed = 0x9747b28c, m = 0x5bd1e995, r = 24;
+    var len = bytes.length, len4 = len & ~3;
+    var h = (seed ^ len) >>> 0;
+    for (var i = 0; i < len4; i += 4){
+      var k = (bytes[i] & 0xff) | ((bytes[i+1] & 0xff) << 8) | ((bytes[i+2] & 0xff) << 16) | (bytes[i+3] << 24);
+      k = Math.imul(k, m) >>> 0;
+      k = (k ^ (k >>> r)) >>> 0;
+      k = Math.imul(k, m) >>> 0;
+      h = Math.imul(h, m) >>> 0;
+      h = (h ^ k) >>> 0;
+    }
+    var rem = len & 3;
+    if (rem === 3) h = (h ^ ((bytes[len4+2] & 0xff) << 16)) >>> 0;
+    if (rem >= 2)  h = (h ^ ((bytes[len4+1] & 0xff) << 8)) >>> 0;
+    if (rem >= 1){ h = (h ^ (bytes[len4] & 0xff)) >>> 0; h = Math.imul(h, m) >>> 0; }
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = Math.imul(h, m) >>> 0;
+    h = (h ^ (h >>> 15)) >>> 0;
+    return h;
+  }
+  function partitionOf(key, n){
+    if (!key.length || !(n > 0)) return null;
+    return ((murmur2(new TextEncoder().encode(key)) & 0x7fffffff) % n);
+  }
+
+  var elKey = document.getElementById('k-key');
+  if (elKey){
+    var elB = document.getElementById('k-before');
+    var elA = document.getElementById('k-after');
+    var outH = document.getElementById('k-hash');
+    var outP1 = document.getElementById('k-p1');
+    var outP2 = document.getElementById('k-p2');
+    var outV = document.getElementById('k-verdict');
+
+    var recompute = function(){
+      var key = elKey.value;
+      var nb = parseInt(elB.value, 10), na = parseInt(elA.value, 10);
+      if (!key.length){
+        outH.textContent = outP1.textContent = outP2.textContent = '—';
+        outV.className = 'verdict';
+        outV.textContent = 'Empty key means a null key: the sticky partitioner decides, nothing is hashed.';
+        return;
+      }
+      outH.textContent = murmur2(new TextEncoder().encode(key)).toString(10);
+      var p1 = partitionOf(key, nb), p2 = partitionOf(key, na);
+      outP1.textContent = p1 === null ? '—' : p1;
+      outP2.textContent = p2 === null ? '—' : p2;
+      if (p1 === null || p2 === null){
+        outV.className = 'verdict';
+        outV.textContent = 'Partition count must be at least 1.';
+      } else if (p1 === p2){
+        outV.className = 'verdict kept';
+        outV.textContent = 'Key stays on the same partition — ordering for this key is unaffected.';
+      } else {
+        outV.className = 'verdict moved';
+        outV.textContent = 'Key moves from partition ' + p1 + ' to ' + p2 + '. Older events stay on ' + p1 + ' while new ones go to ' + p2 + ', so ordering breaks.';
+      }
+    };
+    [elKey, elB, elA].forEach(function(el){ el.addEventListener('input', recompute); });
+    recompute();
+  }
+
+  // Checklist state, stored per viewer in their own browser; best-effort.
+  document.querySelectorAll('.qlist[data-store]').forEach(function(list){
+    var KEY = 'kafka-dd-' + list.dataset.store;
+    var boxes = Array.prototype.slice.call(list.querySelectorAll('input[type=checkbox]'));
+    var counter = document.querySelector('[data-count-for="' + list.dataset.store + '"]');
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { saved = {}; }
+    var render = function(){
+      if (!counter) return;
+      var done = boxes.filter(function(b){ return b.checked; }).length;
+      counter.textContent = done + ' / ' + boxes.length + (done === boxes.length ? ' — all done' : '');
+    };
+    boxes.forEach(function(b){
+      if (saved[b.dataset.q]) b.checked = true;
+      b.addEventListener('change', function(){
+        var state = {};
+        boxes.forEach(function(x){ if (x.checked) state[x.dataset.q] = 1; });
+        try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+        render();
+      });
+    });
+    render();
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+  <p class="eyebrow">Module 6</p>
+  <h1>Consumer internals</h1>
+  <p class="lede">Where most real Kafka incidents actually happen. Producers fail loudly; consumers fail by quietly rebalancing in a loop, reprocessing everything, or stalling on a message nobody notices.</p>
+
+  <h2 id="m6">The poll loop is not what it looks like</h2>
+  <p><code>poll()</code> does not fetch on demand. A background <strong>fetcher</strong> keeps requests in flight to the brokers leading the assigned partitions and fills a local buffer; <code>poll()</code> hands you records from that buffer and returns. If the buffer has data, <code>poll()</code> returns immediately without any network call.</p>
+  <p>Since 0.10.1 <strong>heartbeats are on their own background thread</strong>, which is the fact the rest of this module hangs on: liveness and progress became two separate things, with two separate timeouts, and confusing them causes most consumer incidents.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Setting</th><th>Default</th><th>Controls</th></tr></thead>
+    <tbody>
+      <tr><td><code>fetch.min.bytes</code></td><td>1</td><td>Minimum bytes before the broker responds. Raise it to batch; costs latency</td></tr>
+      <tr><td><code>fetch.max.wait.ms</code></td><td>500</td><td>How long the broker holds a fetch waiting for <code>fetch.min.bytes</code></td></tr>
+      <tr><td><code>max.partition.fetch.bytes</code></td><td>1 MiB</td><td>Per partition per fetch — must exceed your largest message</td></tr>
+      <tr><td><code>fetch.max.bytes</code></td><td>50 MiB</td><td>Across all partitions in one fetch</td></tr>
+      <tr><td><code>max.poll.records</code></td><td>500</td><td>Records handed back per <code>poll()</code> — buffer stays, this is just the slice</td></tr>
+    </tbody>
+  </table></div>
+  <p><code>max.poll.records</code> is the one people reach for when processing is slow, and it is usually the right lever — not because it fetches less, but because it bounds how long one <code>poll()</code>-to-<code>poll()</code> cycle takes, which is what the timeout below actually measures.</p>
+
+  <h2>The three timeouts, and the one that evicts you</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Setting</th><th>Default</th><th>Measures</th></tr></thead>
+    <tbody>
+      <tr><td><code>heartbeat.interval.ms</code></td><td>3 s</td><td>How often the background thread pings the coordinator</td></tr>
+      <tr><td><code>session.timeout.ms</code></td><td>45 s</td><td>No heartbeat for this long → the <strong>process</strong> is considered dead</td></tr>
+      <tr><td><code>max.poll.interval.ms</code></td><td>5 min</td><td>No <code>poll()</code> for this long → the <strong>application</strong> is considered stuck</td></tr>
+    </tbody>
+  </table></div>
+  <p>The distinction is the whole point. Heartbeats come from a background thread, so a consumer whose processing is wedged keeps heartbeating happily — the session timeout never fires. <code>max.poll.interval.ms</code> exists precisely to catch that: an application that is alive but not making progress.</p>
+  <p>(<code>session.timeout.ms</code> was raised from 10 s to 45 s in Kafka 3.0, KIP-735, because the old value evicted healthy consumers during ordinary GC pauses and cloud network blips. Quoting 10 s dates an answer.)</p>
+
+  <div class="callout warn">
+    <span class="tag">The rebalance storm, step by step</span>
+    <p>Processing slows — a downstream service degrades, a batch is unusually large. One consumer exceeds <code>max.poll.interval.ms</code> and is evicted. The group rebalances, so <strong>every</strong> consumer stops. Partitions are reassigned, and work since the last commit is <strong>reprocessed</strong>, which makes everyone slower. The next consumer exceeds the interval. Another rebalance. The group now spends more time rebalancing than consuming and never recovers on its own.</p>
+    <p>The fix is almost never a bigger timeout. It is <code>max.poll.records</code> down so each cycle is shorter and bounded, plus finding out why processing slowed. Raising <code>max.poll.interval.ms</code> to 30 minutes makes a stuck consumer take 30 minutes to be noticed.</p>
+  </div>
+
+  <h2>Offsets: where progress actually lives</h2>
+  <p>Committed offsets go to <code>__consumer_offsets</code> — 50 partitions, compacted, keyed by <code>(group, topic, partition)</code>. Compaction is why it converges to current position per group, and the M2 lesson applies directly. The partition a group's offsets land in also determines its <strong>group coordinator</strong>: the broker leading that partition.</p>
+  <p>A committed offset means <strong>"the next record I want"</strong>, not "the last one I processed". Off-by-one here reprocesses or skips exactly one record per commit, forever.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Strategy</th><th>Behaviour</th><th>Failure mode</th></tr></thead>
+    <tbody>
+      <tr><td><code>enable.auto.commit=true</code> (default)</td><td>Commits the last returned offsets every <code>auto.commit.interval.ms</code> (5 s), during <code>poll()</code></td><td><strong>Commits what was returned, not what was processed.</strong> A crash loses up to 5 s of processing — at-least-once with a window you did not choose</td></tr>
+      <tr><td><code>commitSync()</code></td><td>Blocks until the coordinator acknowledges</td><td>Correct and slow; a commit per batch adds a round-trip to every cycle</td></tr>
+      <tr><td><code>commitAsync()</code></td><td>Fire and forget with a callback</td><td>Fast, but a failed commit is not retried — pair it with a <code>commitSync()</code> in the shutdown path</td></tr>
+    </tbody>
+  </table></div>
+  <p>Offsets also expire: <code>offsets.retention.minutes</code> (7 days). A group idle longer than that loses its position and falls back to <code>auto.offset.reset</code> — which, on <code>latest</code>, silently skips everything that arrived meanwhile. Seasonal and batch consumers hit this.</p>
+  <p><code>auto.offset.reset</code> applies in exactly two situations: no committed offset for the group, or the committed offset is <strong>out of range</strong> because retention deleted it (M2, step 4). <code>earliest</code> reprocesses, <code>latest</code> skips, <code>none</code> throws. <code>latest</code> is the dangerous default because its failure is silent.</p>
+
+  <h2>Rebalance protocols — three generations</h2>
+  <p>A <strong>group coordinator</strong> on one broker tracks membership. When it changes, the group rebalances. How it rebalances has been rewritten twice.</p>
+
+  <h3>Eager — the original</h3>
+  <p>Every consumer revokes <strong>all</strong> its partitions, rejoins, and waits for a new assignment computed by one elected consumer (the group leader) and distributed through the coordinator. Nothing is consumed during the join barrier. Assignment itself is client-side, which means the assignment logic lives in every client in every language. <code>RangeAssignor</code> and <code>RoundRobinAssignor</code> work this way.</p>
+
+  <h3>Cooperative sticky — 2.4, KIP-429</h3>
+  <p><code>CooperativeStickyAssignor</code> makes rebalances <strong>incremental</strong>: consumers keep partitions that are not moving and revoke only the ones being reassigned, across two short rounds instead of one global stop. Adding a consumer to a healthy group stops being a cluster-wide pause. Still client-side assignment.</p>
+
+  <h3>KIP-848 — the new consumer group protocol, GA in 4.0</h3>
+  <p>Assignment moves to the <strong>broker</strong>. There is no elected group leader, no client-side assignor, and no join barrier where everyone waits. Consumers reconcile their own assignment asynchronously against what the coordinator publishes, so membership changes stop being stop-the-world at the protocol level rather than by convention. Enable with <code>group.protocol=consumer</code>.</p>
+  <p>Two consequences worth naming: assignment logic no longer has to be reimplemented per client language, which was a real source of cross-client inconsistency; and rebalance behaviour becomes a broker-side property you can reason about centrally instead of a property of whichever client version each team deployed.</p>
+
+  <h3>Static membership — 2.3, KIP-345</h3>
+  <p>Give each consumer a stable <code>group.instance.id</code> and a restart within <code>session.timeout.ms</code> does <strong>not</strong> trigger a rebalance — the returning member reclaims its partitions. This is what makes rolling deploys of a large consumer group survivable; without it, a 20-pod rollout is 20 rebalances.</p>
+
+  <h2>Rebalance listeners, and the commit that must happen</h2>
+  <ul>
+    <li><code>onPartitionsRevoked</code> — fires <em>before</em> partitions are taken. This is where you <strong>commit</strong>. Skip it and everything since the last commit is reprocessed by whoever gets the partition.</li>
+    <li><code>onPartitionsAssigned</code> — after the new assignment; initialise or seek here.</li>
+    <li><code>onPartitionsLost</code> — the partitions are already gone (the member was evicted), so committing is pointless and may fail. Clean up, do not commit.</li>
+  </ul>
+  <p>Distinguishing <em>revoked</em> from <em>lost</em> is the detail that marks someone who has debugged this: committing in the wrong one of those two is a bug that only appears during incidents.</p>
+
+  <h2>Reading consumer lag honestly</h2>
+  <p>Lag is <code>log end offset − committed offset</code>. High lag means one of several very different things:</p>
+  <ul>
+    <li>The consumer is genuinely slower than the producer — scale out, up to the partition count (M1).</li>
+    <li>A <strong>producer burst</strong>; the consumer is fine and will catch up.</li>
+    <li>The consumer is <strong>rebalancing repeatedly</strong> and barely consuming — lag plus a rising rebalance rate.</li>
+    <li>Partitions are <strong>unassigned</strong> because the group has no members at all.</li>
+    <li>Lag is <strong>concentrated in one partition</strong> — a hot key, not a slow consumer, and adding consumers will not help.</li>
+  </ul>
+  <p>Check lag per partition before concluding anything. "Lag is high, add consumers" is wrong in four of those five cases.</p>
+
+  <h2 id="lab06">Lab 06</h2>
+  <p><strong><a href="lab-06-consumer.html">Open the step-by-step worksheet →</a></strong> — six steps: watch <code>fetch.min.bytes</code> trade latency for batching, read your group's offsets out of <code>__consumer_offsets</code>, measure exactly how many records auto-commit reprocesses after a kill, trigger a <code>max.poll.interval.ms</code> eviction and watch the group thrash, compare eager against cooperative sticky by counting revoked partitions, and make a restart rebalance-free with static membership.</p>
+  <p>Step 4 is the one to do carefully — causing a rebalance storm deliberately, once, is the cheapest way to recognise one at 3am.</p>
+
+  <!--QUIZ:06-consumer-->

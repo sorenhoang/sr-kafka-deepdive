@@ -225,13 +225,19 @@ pre .c{color:var(--muted)}
 
   <nav>
     <a class="wip" href="#m5"><span class="n">M5</span><span>Producer internals</span></a>
-    <a class="wip" href="lab-05-producer.html"><span class="n">↳</span><span>Lab 05 worksheet</span></a>
+    <a class="done" href="lab-05-producer.html"><span class="n">↳</span><span>Lab 05 worksheet</span></a>
     <a class="wip" href="#q-m5"><span class="n">↳</span><span>Questions</span></a>
+    <a class="done" href="#a-m5"><span class="n">↳</span><span>Model answers</span></a>
+  </nav>
+
+  <nav>
+    <a class="wip" href="#m6"><span class="n">M6</span><span>Consumer internals</span></a>
+    <a class="wip" href="lab-06-consumer.html"><span class="n">↳</span><span>Lab 06 worksheet</span></a>
+    <a class="wip" href="#q-m6"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
   <h3>Not started</h3>
   <nav>
-    <a class="todo" href="#roadmap"><span class="n">M6</span><span>Consumer</span></a>
     <a class="todo" href="#roadmap"><span class="n">M7</span><span>Transactions</span></a>
   </nav>
 
@@ -255,9 +261,9 @@ pre .c{color:var(--muted)}
       <tr><td class="num">M2</td><td>Log segments, indexes, page cache, zero-copy, retention, compaction, tiered storage</td><td><code>done</code></td></tr>
       <tr><td rowspan="2">B · Core mechanics</td><td class="num">M3</td><td>Replication, ISR, LEO vs high watermark, unclean leader election, data-loss matrix</td><td><code>done</code></td></tr>
       <tr><td class="num">M4</td><td>KRaft: quorum controller, metadata log, why ZooKeeper had to go</td><td><code>done</code></td></tr>
-      <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td><code>in progress</code></td></tr>
-      <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td>next</td></tr>
-      <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td>—</td></tr>
+      <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td><code>done</code></td></tr>
+      <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td><code>in progress</code></td></tr>
+      <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td>next</td></tr>
       <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td>—</td></tr>
       <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td>—</td></tr>
       <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td>—</td></tr>
@@ -977,6 +983,115 @@ acks                 = all   <span class="c"># producer waits for the whole ISR<
   <p class="qmeta" data-count-for="m5-questions">0 / 10</p>
 
 
+  <p class="eyebrow">Module 6</p>
+  <h1>Consumer internals</h1>
+  <p class="lede">Where most real Kafka incidents actually happen. Producers fail loudly; consumers fail by quietly rebalancing in a loop, reprocessing everything, or stalling on a message nobody notices.</p>
+
+  <h2 id="m6">The poll loop is not what it looks like</h2>
+  <p><code>poll()</code> does not fetch on demand. A background <strong>fetcher</strong> keeps requests in flight to the brokers leading the assigned partitions and fills a local buffer; <code>poll()</code> hands you records from that buffer and returns. If the buffer has data, <code>poll()</code> returns immediately without any network call.</p>
+  <p>Since 0.10.1 <strong>heartbeats are on their own background thread</strong>, which is the fact the rest of this module hangs on: liveness and progress became two separate things, with two separate timeouts, and confusing them causes most consumer incidents.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Setting</th><th>Default</th><th>Controls</th></tr></thead>
+    <tbody>
+      <tr><td><code>fetch.min.bytes</code></td><td>1</td><td>Minimum bytes before the broker responds. Raise it to batch; costs latency</td></tr>
+      <tr><td><code>fetch.max.wait.ms</code></td><td>500</td><td>How long the broker holds a fetch waiting for <code>fetch.min.bytes</code></td></tr>
+      <tr><td><code>max.partition.fetch.bytes</code></td><td>1 MiB</td><td>Per partition per fetch — must exceed your largest message</td></tr>
+      <tr><td><code>fetch.max.bytes</code></td><td>50 MiB</td><td>Across all partitions in one fetch</td></tr>
+      <tr><td><code>max.poll.records</code></td><td>500</td><td>Records handed back per <code>poll()</code> — buffer stays, this is just the slice</td></tr>
+    </tbody>
+  </table></div>
+  <p><code>max.poll.records</code> is the one people reach for when processing is slow, and it is usually the right lever — not because it fetches less, but because it bounds how long one <code>poll()</code>-to-<code>poll()</code> cycle takes, which is what the timeout below actually measures.</p>
+
+  <h2>The three timeouts, and the one that evicts you</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Setting</th><th>Default</th><th>Measures</th></tr></thead>
+    <tbody>
+      <tr><td><code>heartbeat.interval.ms</code></td><td>3 s</td><td>How often the background thread pings the coordinator</td></tr>
+      <tr><td><code>session.timeout.ms</code></td><td>45 s</td><td>No heartbeat for this long → the <strong>process</strong> is considered dead</td></tr>
+      <tr><td><code>max.poll.interval.ms</code></td><td>5 min</td><td>No <code>poll()</code> for this long → the <strong>application</strong> is considered stuck</td></tr>
+    </tbody>
+  </table></div>
+  <p>The distinction is the whole point. Heartbeats come from a background thread, so a consumer whose processing is wedged keeps heartbeating happily — the session timeout never fires. <code>max.poll.interval.ms</code> exists precisely to catch that: an application that is alive but not making progress.</p>
+  <p>(<code>session.timeout.ms</code> was raised from 10 s to 45 s in Kafka 3.0, KIP-735, because the old value evicted healthy consumers during ordinary GC pauses and cloud network blips. Quoting 10 s dates an answer.)</p>
+
+  <div class="callout warn">
+    <span class="tag">The rebalance storm, step by step</span>
+    <p>Processing slows — a downstream service degrades, a batch is unusually large. One consumer exceeds <code>max.poll.interval.ms</code> and is evicted. The group rebalances, so <strong>every</strong> consumer stops. Partitions are reassigned, and work since the last commit is <strong>reprocessed</strong>, which makes everyone slower. The next consumer exceeds the interval. Another rebalance. The group now spends more time rebalancing than consuming and never recovers on its own.</p>
+    <p>The fix is almost never a bigger timeout. It is <code>max.poll.records</code> down so each cycle is shorter and bounded, plus finding out why processing slowed. Raising <code>max.poll.interval.ms</code> to 30 minutes makes a stuck consumer take 30 minutes to be noticed.</p>
+  </div>
+
+  <h2>Offsets: where progress actually lives</h2>
+  <p>Committed offsets go to <code>__consumer_offsets</code> — 50 partitions, compacted, keyed by <code>(group, topic, partition)</code>. Compaction is why it converges to current position per group, and the M2 lesson applies directly. The partition a group's offsets land in also determines its <strong>group coordinator</strong>: the broker leading that partition.</p>
+  <p>A committed offset means <strong>"the next record I want"</strong>, not "the last one I processed". Off-by-one here reprocesses or skips exactly one record per commit, forever.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Strategy</th><th>Behaviour</th><th>Failure mode</th></tr></thead>
+    <tbody>
+      <tr><td><code>enable.auto.commit=true</code> (default)</td><td>Commits the last returned offsets every <code>auto.commit.interval.ms</code> (5 s), during <code>poll()</code></td><td><strong>Commits what was returned, not what was processed.</strong> A crash loses up to 5 s of processing — at-least-once with a window you did not choose</td></tr>
+      <tr><td><code>commitSync()</code></td><td>Blocks until the coordinator acknowledges</td><td>Correct and slow; a commit per batch adds a round-trip to every cycle</td></tr>
+      <tr><td><code>commitAsync()</code></td><td>Fire and forget with a callback</td><td>Fast, but a failed commit is not retried — pair it with a <code>commitSync()</code> in the shutdown path</td></tr>
+    </tbody>
+  </table></div>
+  <p>Offsets also expire: <code>offsets.retention.minutes</code> (7 days). A group idle longer than that loses its position and falls back to <code>auto.offset.reset</code> — which, on <code>latest</code>, silently skips everything that arrived meanwhile. Seasonal and batch consumers hit this.</p>
+  <p><code>auto.offset.reset</code> applies in exactly two situations: no committed offset for the group, or the committed offset is <strong>out of range</strong> because retention deleted it (M2, step 4). <code>earliest</code> reprocesses, <code>latest</code> skips, <code>none</code> throws. <code>latest</code> is the dangerous default because its failure is silent.</p>
+
+  <h2>Rebalance protocols — three generations</h2>
+  <p>A <strong>group coordinator</strong> on one broker tracks membership. When it changes, the group rebalances. How it rebalances has been rewritten twice.</p>
+
+  <h3>Eager — the original</h3>
+  <p>Every consumer revokes <strong>all</strong> its partitions, rejoins, and waits for a new assignment computed by one elected consumer (the group leader) and distributed through the coordinator. Nothing is consumed during the join barrier. Assignment itself is client-side, which means the assignment logic lives in every client in every language. <code>RangeAssignor</code> and <code>RoundRobinAssignor</code> work this way.</p>
+
+  <h3>Cooperative sticky — 2.4, KIP-429</h3>
+  <p><code>CooperativeStickyAssignor</code> makes rebalances <strong>incremental</strong>: consumers keep partitions that are not moving and revoke only the ones being reassigned, across two short rounds instead of one global stop. Adding a consumer to a healthy group stops being a cluster-wide pause. Still client-side assignment.</p>
+
+  <h3>KIP-848 — the new consumer group protocol, GA in 4.0</h3>
+  <p>Assignment moves to the <strong>broker</strong>. There is no elected group leader, no client-side assignor, and no join barrier where everyone waits. Consumers reconcile their own assignment asynchronously against what the coordinator publishes, so membership changes stop being stop-the-world at the protocol level rather than by convention. Enable with <code>group.protocol=consumer</code>.</p>
+  <p>Two consequences worth naming: assignment logic no longer has to be reimplemented per client language, which was a real source of cross-client inconsistency; and rebalance behaviour becomes a broker-side property you can reason about centrally instead of a property of whichever client version each team deployed.</p>
+
+  <h3>Static membership — 2.3, KIP-345</h3>
+  <p>Give each consumer a stable <code>group.instance.id</code> and a restart within <code>session.timeout.ms</code> does <strong>not</strong> trigger a rebalance — the returning member reclaims its partitions. This is what makes rolling deploys of a large consumer group survivable; without it, a 20-pod rollout is 20 rebalances.</p>
+
+  <h2>Rebalance listeners, and the commit that must happen</h2>
+  <ul>
+    <li><code>onPartitionsRevoked</code> — fires <em>before</em> partitions are taken. This is where you <strong>commit</strong>. Skip it and everything since the last commit is reprocessed by whoever gets the partition.</li>
+    <li><code>onPartitionsAssigned</code> — after the new assignment; initialise or seek here.</li>
+    <li><code>onPartitionsLost</code> — the partitions are already gone (the member was evicted), so committing is pointless and may fail. Clean up, do not commit.</li>
+  </ul>
+  <p>Distinguishing <em>revoked</em> from <em>lost</em> is the detail that marks someone who has debugged this: committing in the wrong one of those two is a bug that only appears during incidents.</p>
+
+  <h2>Reading consumer lag honestly</h2>
+  <p>Lag is <code>log end offset − committed offset</code>. High lag means one of several very different things:</p>
+  <ul>
+    <li>The consumer is genuinely slower than the producer — scale out, up to the partition count (M1).</li>
+    <li>A <strong>producer burst</strong>; the consumer is fine and will catch up.</li>
+    <li>The consumer is <strong>rebalancing repeatedly</strong> and barely consuming — lag plus a rising rebalance rate.</li>
+    <li>Partitions are <strong>unassigned</strong> because the group has no members at all.</li>
+    <li>Lag is <strong>concentrated in one partition</strong> — a hot key, not a slow consumer, and adding consumers will not help.</li>
+  </ul>
+  <p>Check lag per partition before concluding anything. "Lag is high, add consumers" is wrong in four of those five cases.</p>
+
+  <h2 id="lab06">Lab 06</h2>
+  <p><strong><a href="lab-06-consumer.html">Open the step-by-step worksheet →</a></strong> — six steps: watch <code>fetch.min.bytes</code> trade latency for batching, read your group's offsets out of <code>__consumer_offsets</code>, measure exactly how many records auto-commit reprocesses after a kill, trigger a <code>max.poll.interval.ms</code> eviction and watch the group thrash, compare eager against cooperative sticky by counting revoked partitions, and make a restart rebalance-free with static membership.</p>
+  <p>Step 4 is the one to do carefully — causing a rebalance storm deliberately, once, is the cheapest way to recognise one at 3am.</p>
+
+    <h2 id="q-m6">Interview questions — module 6</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m6-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>What does poll() actually do?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Where are consumer offsets stored, and what does a committed offset mean?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>When does auto.offset.reset apply, and which value is dangerous?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Explain session.timeout.ms versus max.poll.interval.ms.</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>What is wrong with enable.auto.commit=true?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>What does cooperative sticky rebalancing change, and what does static membership change?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Walk through a rebalance storm: how it starts, why it sustains itself, and how you stop it.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A consumer group shows lag of 2 million. Walk the diagnosis.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why does KIP-848 move assignment to the broker, and what does that actually buy?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>You need at-least-once with the smallest possible reprocessing window, and the consumer calls a non-idempotent downstream API. Design it.</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m6-questions">0 / 10</p>
+
+
   <h2 id="a-m0">Model answers — module 0</h2>
   <p>Senior-tier answers at the depth an interview is looking for. Written after the attempt, never before.</p>
 
@@ -1210,6 +1325,49 @@ acks                 = all   <span class="c"># producer waits for the whole ISR<
   </ul>
   <p><strong>Why faster failover matters here specifically.</strong> Under ZooKeeper, a controller failover window of minutes was a window in which no partition could recover from a broker failure — so an unlucky coincidence became a compound outage. KRaft shrinking that window to an election does not change any guarantee; it shrinks the period in which two independent failures can combine into something worse than either.</p>
   <p><strong>The two wrong answers are symmetrical:</strong> "KRaft doesn't affect durability, so controller loss is harmless" ignores the frozen recovery; "losing the controllers is catastrophic" ignores that the data plane is unaffected and nothing is lost. Being able to hold both halves at once is the answer.</p>
+
+  <h2 id="a-m5">Model answers — module 5</h2>
+  <p class="qmeta">Written rather than attempted. Flagged for a cold retry in M13.</p>
+
+  <h3>Q1-Q3 · Junior tier, condensed</h3>
+  <p><strong><code>send()</code></strong> serializes, partitions, appends to an in-memory batch and returns a future. A Sender thread drains batches, groups them per broker and completes the futures. So callbacks run on the Sender thread — blocking in one stalls all sending — and a producer killed without <code>close()</code> loses whatever is still buffered.</p>
+  <p><strong><code>batch.size</code></strong> (16 KiB) is maximum bytes per partition in one batch, not a global size and not a count. <strong><code>linger.ms</code></strong> (0 in Java) is how long to wait for more records before sending a partial batch. A batch goes when full or when linger expires.</p>
+  <p><strong>Compression</strong> belongs on the producer because it is applied per batch before sending and the broker stores those bytes untouched. <code>lz4</code> when CPU dominates, <code>zstd</code> when storage and cross-AZ bandwidth dominate — usually the right default. Setting a codec on the <em>topic</em> instead forces decompress-and-recompress per batch, costing CPU and losing zero-copy.</p>
+
+  <h3>Q4-Q6 · Mid tier, condensed</h3>
+  <p><strong><code>linger.ms=0</code> still batches.</strong> It means "do not wait", not "send alone". Records accumulate while a request is in flight, and the next request takes everything that arrived meanwhile — so under load batching is driven by the in-flight window. Linger buys bigger batches specifically at low load, where nothing is in flight to accumulate behind.</p>
+  <p><strong>A service slow for no reason</strong> is often <code>send()</code> blocking on <code>buffer.memory</code>. The accumulator is a fixed 32 MiB pool; when it fills, <code>send()</code> blocks up to <code>max.block.ms</code> (60 s) and then throws, propagating broker backpressure into application latency through a call assumed to be asynchronous. <code>max.block.ms</code> also covers metadata, so producing to a nonexistent topic looks identical.</p>
+  <p><strong><code>retries=3</code></strong> does almost nothing intended. <code>retries</code> defaults to <code>Integer.MAX_VALUE</code> and stopped being the limit when <code>delivery.timeout.ms</code> (120 s) arrived — that bounds the whole attempt. Worse, it can abandon a transient leader election that would have resolved. To give up after ten seconds, set <code>delivery.timeout.ms=10000</code>.</p>
+
+  <h3>Q7 · The idempotent producer, and its boundaries</h3>
+  <p><strong>Mechanism.</strong> The producer obtains a <strong>producer id</strong> and an <strong>epoch</strong>. Every batch carries the PID, the epoch and a <strong>per-partition sequence number</strong>. The broker keeps the last sequence per <code>(PID, partition)</code>: a batch whose sequence it has already seen is acknowledged and discarded, so the duplicate never reaches the log; a batch arriving ahead of the expected sequence is rejected with <code>OutOfOrderSequenceException</code> and retried in order.</p>
+  <p>Because the broker enforces dedupe <em>and</em> ordering, <code>max.in.flight</code> can stay at 5 rather than being forced to 1 — you keep pipelining and lose the reordering risk. That is the practical win, and it is why idempotence became a default rather than an option.</p>
+  <p><strong>Three things it does not give you.</strong></p>
+  <ul>
+    <li><strong>It does not survive a producer restart.</strong> The PID belongs to a producer session; a new instance gets a new one, and the broker has no way to recognise what the previous instance wrote. Crash before the response arrives, restart, retry — two copies.</li>
+    <li><strong>It is not cross-partition or cross-topic atomicity.</strong> Two records to two partitions can still end with one written and one not. That is transactions.</li>
+    <li><strong>It is not end-to-end exactly-once.</strong> It removes duplicates introduced by the producer's own retries. An application that calls <code>send()</code> twice has sent two records, and the broker is right to keep both.</li>
+  </ul>
+  <p>The line worth having ready: <em>idempotence makes a retry safe, not a system exactly-once.</em> Candidates who stop at "it gives you exactly-once" get taken apart by the restart question.</p>
+
+  <h3>Q8 · How the null-key partitioner changed, and why twice</h3>
+  <p><strong>Before 2.4 — round-robin per record.</strong> A modest produce rate spread records across every partition, so each batch held very little. Many small requests, poor compression ratios, more broker work per byte.</p>
+  <p><strong>2.4, KIP-480 — the sticky partitioner.</strong> Fill one partition's batch, send it, then switch. Same traffic, far fewer and far larger batches. A straightforward win.</p>
+  <p><strong>3.3, KIP-794 — strictly uniform sticky.</strong> The first fix equalised <em>batches</em> per partition. But a slow broker drains slower, so sticking to its partitions for the same number of batches meant sending it proportionally <strong>more bytes</strong> — pushing load toward the brokers least able to take it, which is exactly backwards and only shows up under real-world skew. The current partitioner assigns by how much each partition has actually accepted, and <code>partitioner.adaptive.partitioning.enable</code> actively steers away from slow brokers. <code>DefaultPartitioner</code> is deprecated; leaving <code>partitioner.class</code> unset gets current behaviour.</p>
+  <p><strong>Why the second change is the interesting one.</strong> The first optimised a proxy for the thing that mattered — batch count instead of bytes delivered — and the error was invisible in design review and only appeared in production with heterogeneous broker performance. Being able to say that, rather than just listing three versions, is the point of the question.</p>
+
+  <h3>Q9 · Intermittent RecordTooLargeException for the same payload size</h3>
+  <p><strong>Two limits, in different places.</strong> <code>max.request.size</code> on the producer (1 MiB) is checked client-side and fails before anything leaves the process. <code>message.max.bytes</code> on the broker or topic is checked after the record crosses the network. Raising one without the other relocates the failure rather than removing it, and the broker-side rejection arrives later and with a less obvious message.</p>
+  <p><strong>Why it is intermittent, which is the real question.</strong> The limit applies to the <strong>compressed batch</strong>, not the individual record. A record that fits comfortably on its own can push a batch over the limit when it happens to be grouped with others, and whether it is grouped depends on timing, load and <code>linger.ms</code>. Compression ratio varies with the batch's contents too, so two batches of identical raw size can land on opposite sides of the limit. Same payload, different outcome, no pattern visible from the application.</p>
+  <p><strong>Second source of intermittency:</strong> a topic-level <code>max.message.bytes</code> override means the limit can differ per topic, so a producer writing to several topics fails on some and not others.</p>
+  <p><strong>How to diagnose.</strong> Compare <code>max.request.size</code>, the broker's <code>message.max.bytes</code>, and any topic override; measure the <em>compressed batch</em> size rather than the record size; and check whether failures correlate with load rather than with payload. Then check the consumer side before changing anything — <code>fetch.max.bytes</code> and <code>max.partition.fetch.bytes</code> must accommodate the new size, or the symptom moves from a visible error to a consumer that silently stalls forever on a message it cannot fetch. An error is the good outcome.</p>
+
+  <h3>Q10 · Lowest possible end-to-end latency, and the floor</h3>
+  <p><strong>Producer side:</strong> <code>linger.ms=0</code>, a smaller <code>batch.size</code> so nothing waits to fill, <code>compression.type=none</code> or <code>lz4</code>, and keep idempotence on because it costs nothing in latency.</p>
+  <p><strong>Two mistakes that look like tuning.</strong> Raising <code>buffer.memory</code> does nothing for latency and hides backpressure that you would rather see. Setting <code>max.in.flight=1</code> "to be safe" serialises requests and adds a round-trip per batch, buying an ordering guarantee that idempotence already provides.</p>
+  <p><strong>The floor is not on the producer.</strong> With <code>acks=all</code>, the leader cannot respond until every in-sync replica has the record, so a replication round-trip is in the critical path. And from M3, a consumer cannot read past the high watermark, which needs that same round-trip to advance. Add the consumer's <code>fetch.max.wait.ms</code> on an empty fetch and you have the floor: <strong>roughly one replication round-trip plus one fetch wait</strong>, with no producer setting that removes it.</p>
+  <p>Dropping to <code>acks=1</code> removes the first half and buys a silent data-loss window — almost never the right trade, and worth naming as a rejected option rather than leaving unmentioned.</p>
+  <p><strong>The move that makes this a senior answer:</strong> separate which half of the latency is yours to tune from which half is the durability guarantee showing itself — and then ask whether the requirement is genuinely end-to-end or just produce-ack. Teams routinely measure the second and specify the first, and the gap between them is the replication round-trip they are about to try to tune away.</p>
 </main>
 </div>
 

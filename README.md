@@ -35,11 +35,11 @@ M2 is complete: lab 02 run, junior and mid tiers self-assessed, Q7 and Q8 answer
 and graded. Q9 and Q10 were answered from the model rather than attempted cold —
 worth retrying in M13, alongside M0 Q9 and Q10.
 
-M3 and M4: labs run, and all twenty questions answered from the model rather than
+M3, M4 and M5: labs run, and all thirty questions answered from the model rather than
 attempted, so `model` rather than a tick. The quiz entries stay unchecked on purpose —
-the tracker records what has been defended, not what has been read. Twenty-four
+the tracker records what has been defended, not what has been read. Thirty-four
 questions are now queued for a cold retry in M13: M0 Q9-Q10, M2 Q9-Q10, and all of
-M3 and M4.
+M3, M4 and M5.
 
 | Module | Topic | Material | Lab run | Questions graded |
 |---|---|:--:|:--:|:--:|
@@ -48,8 +48,8 @@ M3 and M4.
 | M2 | Storage internals: segments, page cache, zero-copy, compaction | ready | ✅ | ✅ |
 | M3 | Replication, ISR, LEO vs high watermark, unclean leader election | ready | ✅ | model |
 | M4 | KRaft: quorum controller, metadata log | ready | ✅ | model |
-| M5 | Producer internals, idempotent producer | ready | | |
-| M6 | Consumer internals, rebalance, KIP-848 | | | |
+| M5 | Producer internals, idempotent producer | ready | ✅ | model |
+| M6 | Consumer internals, rebalance, KIP-848 | ready | | |
 | M7 | Delivery semantics, transactions, exactly-once | | | |
 | M8 | Schema Registry, compatibility, evolution | | | |
 | M9 | Connect, CDC/Debezium, Kafka Streams | | | |
@@ -82,6 +82,7 @@ labs/lab03-replication/
                      three brokers you break on purpose; ISR, high watermark, acks
 labs/lab04-kraft/    the metadata log, the controller quorum, controller failover
 labs/lab05-producer/ batching, compression, buffer backpressure, idempotence
+labs/lab06-consumer/ fetch tuning, offsets, rebalance storms, static membership
 private/             gitignored — raw answers, grades and gap notes, local only
 ```
 

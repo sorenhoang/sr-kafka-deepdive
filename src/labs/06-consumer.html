@@ -1,0 +1,206 @@
+  <p class="backlink"><a href="index.html">← Kafka Deep Dive</a></p>
+  <p class="eyebrow">Module 6 · lab worksheet</p>
+  <h1>Lab 06 — Consumer internals</h1>
+  <p class="lede">Six experiments on the half of Kafka where incidents actually happen. Step 4 causes a rebalance storm on purpose — doing that once is the cheapest way to recognise one at 3am.</p>
+  <p class="qmeta">Expect 50-70 minutes. Several steps need two or three terminals, each with its own <code>source .venv/bin/activate</code>.</p>
+
+  <ul class="labtrack qlist" data-store="lab06-steps" style="margin:22px 0">
+    <li><label><input type="checkbox" data-q="1"><span>1 · fetch.min.bytes and first-record latency</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span>2 · read __consumer_offsets</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span>3 · measure the auto-commit window</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span>4 · cause a rebalance storm</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span>5 · eager vs cooperative sticky</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span>6 · static membership</span></label></li>
+  </ul>
+
+  <h2>Setup</h2>
+<pre>cd labs/lab06-consumer
+docker compose up -d &amp;&amp; docker compose ps
+
+docker exec lab06-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 \
+  --create --topic lab06.events --partitions 4 --replication-factor 1
+
+python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements.txt
+cd scripts &amp;&amp; python3 00_seed.py 10000</pre>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 1</span>fetch.min.bytes trades latency for batching</h3>
+    <p><strong>Proves:</strong> the fetch is a broker-side wait, not a client-side poll.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>A consumer with <code>fetch.min.bytes=100000</code> and <code>fetch.max.wait.ms=2000</code> is subscribed to a quiet topic. One 16-byte record is produced. How long before the consumer sees it?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>python3 01_fetch_tuning.py 1 500
+python3 01_fetch_tuning.py 100000 2000</pre>
+
+    <h4>Expected</h4>
+<pre>fetch.min.bytes=1       fetch.max.wait.ms=500    first record after      ~5 ms
+fetch.min.bytes=100000  fetch.max.wait.ms=2000   first record after    ~2000 ms</pre>
+
+    <h4>Why</h4>
+    <p>The broker holds the fetch request open until it has <code>fetch.min.bytes</code> to return <em>or</em> <code>fetch.max.wait.ms</code> elapses. One small record satisfies neither condition, so the consumer waits out the full timeout. This is a long-poll, and the latency is on the broker side — no amount of polling faster helps.</p>
+    <p>The practical reading: <code>fetch.min.bytes</code> is a throughput optimisation that costs tail latency exactly when traffic is thin, which is the mirror image of <code>linger.ms</code> on the producer. On a busy topic it is nearly free; on a quiet one it is the dominant latency term.</p>
+
+    <h4>Check yourself</h4>
+    <p>You have a low-volume topic with a 100 ms end-to-end latency requirement. What are the defaults of <code>fetch.min.bytes</code> and <code>fetch.max.wait.ms</code>, and which one would break your SLA if someone "tuned for throughput"?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 2</span>Read the offsets topic directly</h3>
+    <p><strong>Proves:</strong> consumer progress is just records in a compacted Kafka topic.</p>
+
+    <h4>Run</h4>
+<pre>python3 02_autocommit_window.py consume lab06-peek   <span class="c"># Ctrl+C after ~10s</span>
+
+docker exec lab06-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:19092 --describe --group lab06-peek
+
+docker exec lab06-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:19092 --topic __consumer_offsets \
+  --from-beginning --max-messages 10 \
+  --formatter 'kafka.coordinator.group.GroupMetadataManager$OffsetsMessageFormatter'</pre>
+
+    <h4>Expected</h4>
+    <p><code>--describe</code> gives the familiar table: current offset, log end offset, lag, and the member owning each partition. The raw topic shows records keyed by <code>(group, topic, partition)</code> carrying an offset and metadata.</p>
+
+    <h4>Why</h4>
+    <p><code>__consumer_offsets</code> has 50 partitions and is <strong>compacted</strong>, so it converges to the current position per key — exactly the compaction behaviour from M2, applied to consumer progress. The partition a group hashes to also determines its <strong>group coordinator</strong>: the broker leading that partition. That is why a single broker going down can affect some groups' rebalances and not others.</p>
+    <p>Also note what a committed offset means: <strong>the next record the group wants</strong>, not the last one processed. Off by one here and you reprocess or skip exactly one record per commit, forever, with no error.</p>
+
+    <h4>Check yourself</h4>
+    <p><code>offsets.retention.minutes</code> defaults to 7 days. What happens to a batch consumer that runs monthly, and which <code>auto.offset.reset</code> value makes that failure silent?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 3</span>Measure the auto-commit window</h3>
+    <p><strong>Proves:</strong> auto-commit commits what was <em>returned</em>, not what was <em>processed</em>.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p>A consumer with auto-commit on processes ~100 records per second and is killed 12 seconds in. On restart, roughly how many records does it see again — 0, a handful, or hundreds?</p>
+    </div>
+
+    <h4>Run</h4>
+<pre>python3 02_autocommit_window.py consume lab06-ac1    <span class="c"># Ctrl+C after ~10s</span>
+python3 02_autocommit_window.py recount lab06-ac1</pre>
+
+    <h4>Expected</h4>
+    <p>The second run replays a batch of records the first had already processed — everything since the last 5-second auto-commit tick.</p>
+
+    <h4>Why</h4>
+    <p>Auto-commit fires on a timer, during <code>poll()</code>, and commits the offsets that <code>poll()</code> <strong>returned</strong>. It has no idea whether your code finished with them. So the guarantee is at-least-once with a window of up to <code>auto.commit.interval.ms</code> — a window you did not choose and cannot see in any metric.</p>
+    <p>Worse in the other direction: if <code>poll()</code> returns 500 records and you crash after processing 10, the next poll may still auto-commit all 500 as done, and the remaining 490 are <strong>skipped</strong>. Whether auto-commit over- or under-commits depends on timing, which is the real objection to it.</p>
+    <p>The fix is <code>enable.auto.commit=false</code>, process, then <code>commitSync()</code> — the commit becomes a statement about processing, which is how everyone reads it anyway.</p>
+
+    <h4>Check yourself</h4>
+    <p>Your consumer is idempotent downstream. Is auto-commit now fine? Name the one thing you would still check before leaving it on.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 4</span>Cause a rebalance storm</h3>
+    <p><strong>Proves:</strong> heartbeats and progress are different things, and the group punishes the second.</p>
+
+    <h4 class="predict">Predict first</h4>
+    <div class="predict-box">
+      <p><code>max.poll.interval.ms=10000</code>, <code>session.timeout.ms=45000</code>, and the consumer sleeps 12 seconds per batch. The heartbeat thread is healthy the whole time. Does the consumer get evicted — and if so, which timeout fires?</p>
+    </div>
+
+    <h4>Run — two terminals</h4>
+<pre>python3 03_poll_interval.py 12 c1
+python3 03_poll_interval.py 12 c2</pre>
+
+    <h4>Expected</h4>
+    <p>Repeated <code>REVOKED</code> / <code>ASSIGNED</code> churn in both terminals. Each eviction rebalances the whole group, so the <em>other</em> consumer stops too, and the cycle repeats indefinitely.</p>
+
+    <h4>Why</h4>
+    <p><code>session.timeout.ms</code> never fires — the background heartbeat thread is fine, because the process is alive. <code>max.poll.interval.ms</code> exists precisely for this: an application that is alive but not making progress. Exceed it and the coordinator removes the member.</p>
+    <p>Now the self-sustaining part. The eviction rebalances the group, so every consumer stops. Work since the last commit is reprocessed, adding load. The added load makes the next consumer exceed the interval. The group spends more time rebalancing than consuming and <strong>does not recover on its own</strong>.</p>
+    <p><strong>The fix is almost never a bigger timeout.</strong> Lower <code>max.poll.records</code> so each poll-to-poll cycle is shorter and bounded — the timeout measures cycle duration, not throughput — then find out why processing slowed. Raising <code>max.poll.interval.ms</code> to 30 minutes ends the storm by making a genuinely stuck consumer take 30 minutes to detect: a loud failure traded for a slow one.</p>
+
+    <h4>Check yourself</h4>
+    <p>Try it: restart both with <code>python3 03_poll_interval.py 2 c1</code>. The sleep is now under the interval. Which setting did you effectively change, and what would the equivalent production change be?</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 5</span>Eager versus cooperative sticky</h3>
+    <p><strong>Proves:</strong> an incremental rebalance revokes only what moves.</p>
+
+    <h4>Run — three terminals, twice</h4>
+<pre><span class="c"># round 1: eager</span>
+python3 05_assignor_compare.py range c1
+python3 05_assignor_compare.py range c2
+<span class="c"># ...then start c3 and watch c1 and c2</span>
+python3 05_assignor_compare.py range c3
+
+<span class="c"># round 2: cooperative, fresh group</span>
+python3 05_assignor_compare.py cooperative-sticky c1
+python3 05_assignor_compare.py cooperative-sticky c2
+python3 05_assignor_compare.py cooperative-sticky c3</pre>
+
+    <h4>Expected</h4>
+    <p>With <code>range</code>, adding the third consumer makes c1 and c2 revoke <strong>every</strong> partition before anything is reassigned. With <code>cooperative-sticky</code>, they revoke only the partitions actually moving to c3 — often one each, sometimes none.</p>
+
+    <h4>Why</h4>
+    <p>Eager rebalancing is stop-the-world by construction: everyone gives everything back, rejoins, waits at a join barrier while one elected consumer computes the assignment, then receives it. Nothing is consumed throughout. Cooperative sticky (KIP-429, 2.4) splits this into two short rounds and revokes only what is moving, so a group that is otherwise healthy keeps consuming while one member joins.</p>
+    <p>The number to carry away is the revoked total printed on exit. On a 4-partition topic the difference is small; on a 200-partition topic with 20 consumers it is the difference between a deploy being invisible and a deploy being an incident.</p>
+    <p>Both of these are still <em>client-side</em> assignment. KIP-848 (GA in 4.0, <code>group.protocol=consumer</code>) moves it to the broker and removes the join barrier entirely — try it if your client build supports it, since client support lags the broker.</p>
+
+    <h4>Check yourself</h4>
+    <p>Cooperative sticky makes rebalances cheaper. Name the situation where the right answer is to have no rebalance at all, and which feature provides that.</p>
+  </div>
+
+  <!-- ─────────────────────────────── -->
+  <div class="step">
+    <h3><span class="sn">STEP 6</span>Static membership</h3>
+    <p><strong>Proves:</strong> a planned restart does not have to cost a rebalance.</p>
+
+    <h4>Run — two terminals</h4>
+<pre><span class="c"># dynamic: no group.instance.id</span>
+python3 04_static_membership.py c1
+python3 04_static_membership.py c2
+<span class="c"># Ctrl+C c2, restart it, watch c1</span>
+
+<span class="c"># static: fresh group, both with instance ids</span>
+python3 04_static_membership.py c1 static-1
+python3 04_static_membership.py c2 static-2
+<span class="c"># Ctrl+C c2, restart within 45s, watch c1</span></pre>
+
+    <h4>Expected</h4>
+    <p>Dynamic: c1 logs <code>REVOKED</code>/<code>ASSIGNED</code> twice — once when c2 leaves, once when it returns. Static: c1 logs <strong>nothing</strong>. The returning member reclaims its own partitions.</p>
+
+    <h4>Why</h4>
+    <p>With <code>group.instance.id</code> set, a member that disappears is not immediately removed from the group — the coordinator holds its assignment until <code>session.timeout.ms</code> expires. Restart inside that window and it resumes its old partitions with no rebalance for anyone.</p>
+    <p>This is what makes rolling deploys of a large consumer group survivable. Without it, a 20-pod rollout is 20 rebalances, each one stopping the entire group. With it, zero — provided each pod has a stable identity, which in Kubernetes means a StatefulSet or an explicitly injected ordinal rather than a random pod name.</p>
+    <p>The trade: a genuinely dead static member is not noticed until <code>session.timeout.ms</code> elapses, so its partitions sit idle for that long. Static membership moves you from "every restart costs a rebalance" to "every crash costs 45 seconds of that partition's throughput" — which is the right trade for a group that deploys often.</p>
+
+    <h4>Check yourself</h4>
+    <p>You set <code>group.instance.id</code> from the pod name in a Deployment, not a StatefulSet. What happens on the next rollout, and why is it worse than not using static membership at all?</p>
+  </div>
+
+  <h2>Tear down</h2>
+<pre>docker compose down -v</pre>
+
+  <h2>When something goes wrong</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+    <tbody>
+      <tr><td>Port 9092 in use</td><td>Lab 02 or 05 is running. <code>docker compose down</code> in those.</td></tr>
+      <tr><td>Step 1 returns instantly for both settings</td><td>The topic still has backlog, so <code>fetch.min.bytes</code> is satisfied at once. Use a fresh topic or consume to the end first.</td></tr>
+      <tr><td>Step 3 replays nothing</td><td>You ran for less than one auto-commit interval, so nothing was committed and the whole run replays — which is the same lesson, more extreme.</td></tr>
+      <tr><td>Step 4 shows no eviction</td><td>Only one consumer and few partitions means poll returns nothing to sleep on. Seed more data, or check the sleep exceeds 10s.</td></tr>
+      <tr><td>Step 6 static restart still rebalances</td><td>The restart took longer than <code>session.timeout.ms</code>, or the two runs used different instance ids. Restart promptly and keep the id identical.</td></tr>
+      <tr><td><code>cooperative-sticky</code> rejected</td><td>Older librdkafka builds do not support it. <code>pip install -U confluent-kafka</code>.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Done when</h2>
+  <p>You can answer these without looking anything up: why a consumer can heartbeat happily and still be evicted; what auto-commit actually commits and both ways it can be wrong; what cooperative sticky changes and what static membership changes, and why they are different problems; and the five different things high consumer lag can mean.</p>

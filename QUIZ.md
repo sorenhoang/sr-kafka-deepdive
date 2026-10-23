@@ -589,3 +589,102 @@ Two limits in different places, and the error can come from either. `max.request
 Producer side: `linger.ms=0`, a smaller `batch.size` so nothing waits to fill, `compression.type=none` or `lz4`, and keep idempotence on since it costs nothing in latency. Avoid the mistakes that add latency while looking like tuning: a large `buffer.memory` does not help latency and hides backpressure, and `max.in.flight=1` to "be safe" serialises requests and adds a round-trip per batch for a guarantee idempotence already provides. The floor is not on the producer at all. With `acks=all` the leader cannot respond until every in-sync replica has the record, so a replication round-trip is in the critical path — and from M3, a consumer cannot read past the high watermark, which needs that same round-trip to advance. So end-to-end latency has a hard floor of roughly one replication round-trip plus the consumer's `fetch.max.wait.ms` for an empty fetch. Dropping to `acks=1` removes the first half and buys a silent data-loss window, which is almost never the right trade. The senior move is to say which half of the latency is yours to tune and which is the durability guarantee showing itself, and to ask whether the latency requirement is really end-to-end or just produce-ack — people routinely measure the second and specify the first.
 
 </details>
+
+
+## M6 · Consumer internals
+
+### Junior
+
+**M6.1** — What does poll() actually do?
+
+<details>
+<summary>Answer</summary>
+
+It returns records from a local buffer that a background fetcher keeps filling with in-flight requests to the brokers leading the assigned partitions. If the buffer has data, `poll()` returns immediately with no network call. Since 0.10.1 heartbeats are sent from a separate background thread rather than from `poll()`, which is why liveness and progress became two different things with two different timeouts.
+
+</details>
+
+**M6.2** — Where are consumer offsets stored, and what does a committed offset mean?
+
+<details>
+<summary>Answer</summary>
+
+In `__consumer_offsets`, an internal compacted topic with 50 partitions, keyed by (group, topic, partition). The partition a group's offsets land in also picks its group coordinator — the broker leading that partition. A committed offset is **the next record the group wants**, not the last one processed; getting that off by one reprocesses or skips exactly one record per commit, forever.
+
+</details>
+
+**M6.3** — When does auto.offset.reset apply, and which value is dangerous?
+
+<details>
+<summary>Answer</summary>
+
+In exactly two situations: the group has no committed offset, or its committed offset is out of range because retention deleted that data. `earliest` reprocesses from the start, `latest` jumps to the end, `none` throws. `latest` is the dangerous one because its failure is silent — a consumer that was down longer than retention quietly skips everything it missed and reports no error.
+
+</details>
+
+### Mid
+
+**M6.4** — Explain session.timeout.ms versus max.poll.interval.ms.
+
+<details>
+<summary>Answer</summary>
+
+`session.timeout.ms` (45 s) is process liveness: no heartbeat within it and the coordinator declares the member dead. Heartbeats come from a background thread, so this fires when the process is gone or unreachable. `max.poll.interval.ms` (5 min) is application progress: no call to `poll()` within it and the member is evicted even though it has been heartbeating normally. The second exists precisely because the first cannot catch a consumer that is alive but wedged in processing. Note that `session.timeout.ms` was raised from 10 s to 45 s in Kafka 3.0 (KIP-735) because the old value evicted healthy consumers during ordinary GC pauses.
+
+</details>
+
+**M6.5** — What is wrong with enable.auto.commit=true?
+
+<details>
+<summary>Answer</summary>
+
+It commits the offsets that were **returned** by the last poll, not the ones you finished processing, on a timer during `poll()`. So a crash loses up to `auto.commit.interval.ms` (5 s) of work that was already committed as done — at-least-once with a window you did not choose and cannot see. It is not wrong for idempotent consumers that genuinely do not care; it is wrong whenever the commit is being read as a statement about processing, which is how most people read it.
+
+</details>
+
+**M6.6** — What does cooperative sticky rebalancing change, and what does static membership change?
+
+<details>
+<summary>Answer</summary>
+
+Cooperative sticky (KIP-429, 2.4) makes a rebalance incremental: consumers keep partitions that are not moving and revoke only those being reassigned, over two short rounds, instead of everyone revoking everything and waiting at a join barrier. Static membership (KIP-345, 2.3) gives each consumer a stable `group.instance.id` so a restart within `session.timeout.ms` triggers no rebalance at all — the returning member reclaims its partitions. They solve different problems: the first makes rebalances cheaper, the second stops them happening for planned restarts. A 20-pod rolling deploy is 20 rebalances without it.
+
+</details>
+
+### Senior
+
+**M6.7** — Walk through a rebalance storm: how it starts, why it sustains itself, and how you stop it.
+
+<details>
+<summary>Answer</summary>
+
+**Start:** processing slows — a downstream dependency degrades, a batch is unusually large, a GC pause lands badly. One consumer exceeds `max.poll.interval.ms` and is evicted. **Sustain:** the group rebalances, so every consumer stops consuming; partitions are reassigned; work since the last commit is reprocessed, which adds load; the added load makes the next consumer exceed the interval, and the cycle repeats. The group now spends more time rebalancing than consuming and does not recover on its own — the failure feeds itself, which is what makes it a storm rather than an incident. **Stop it:** reduce `max.poll.records` so each poll-to-poll cycle is shorter and bounded; that is the lever, because the timeout measures cycle duration rather than throughput. Then find why processing slowed, since the eviction was a symptom. **The wrong fix** is raising `max.poll.interval.ms`: it ends the storm by making a genuinely stuck consumer take that much longer to detect, trading a loud failure for a slow one. Longer term: cooperative sticky so rebalances are incremental, static membership so deploys do not cause them, and idempotent processing so the reprocessing step costs correctness nothing.
+
+</details>
+
+**M6.8** — A consumer group shows lag of 2 million. Walk the diagnosis.
+
+<details>
+<summary>Answer</summary>
+
+Lag is `log end offset − committed offset`, and it has at least five distinct causes that need different responses, so the first move is **lag per partition, not per group**. Even distribution across partitions with a steady climb means the consumer is genuinely slower than the producer — scale out, bounded by partition count. Even distribution with lag already falling means a producer burst and nothing to do. Lag with a high rebalance rate means the group is thrashing and barely consuming, which is the previous question. Lag with no members means nobody is assigned at all — check whether the deployment is actually running. Lag concentrated in **one partition** is a hot key or a poison message, and adding consumers will not help: one partition is one consumer. Also check whether the consumer is stalled on a message larger than `max.partition.fetch.bytes`, which produces no error and no progress — the quietest of the five. The thing to say out loud is that "lag is high, add consumers" is the right action in one of these cases and useless or harmful in the others.
+
+</details>
+
+**M6.9** — Why does KIP-848 move assignment to the broker, and what does that actually buy?
+
+<details>
+<summary>Answer</summary>
+
+Under the old protocol, assignment was computed by an elected consumer — the group leader — and every membership change passed through a join barrier where the whole group waited. Two problems follow. The assignment algorithm had to be implemented in every client in every language, so behaviour differed by client and version, and a mixed-language group could not be reasoned about as one thing. And the barrier made rebalancing inherently synchronous: cooperative sticky reduced what was revoked but the protocol still had everyone meet. KIP-848 moves assignment into the group coordinator and lets consumers reconcile their own assignment asynchronously against what the coordinator publishes. No elected leader, no barrier. What it buys: rebalance behaviour becomes a broker-side property you can reason about and upgrade centrally, rather than a property of whichever client each team happened to deploy; and membership changes stop being stop-the-world at the protocol level rather than by careful convention. GA in 4.0, enabled with `group.protocol=consumer`. The honest caveat is that client support lags the broker, so in practice this is a migration rather than a switch.
+
+</details>
+
+**M6.10** — You need at-least-once with the smallest possible reprocessing window, and the consumer calls a non-idempotent downstream API. Design it.
+
+<details>
+<summary>Answer</summary>
+
+The reprocessing window is the gap between the last commit and the crash, so shrinking it means committing more often — and committing after processing, never before. Disable auto-commit, process each batch, then `commitSync()`; with `max.poll.records` tuned down the batch is small and the window is bounded by one batch rather than by a 5-second timer. The cost is a commit round-trip per batch, which is the trade being made explicitly. **But the window cannot reach zero**, and that is the part the question is really about: a crash between the downstream call and the commit will always replay that batch, and no Kafka setting changes it, because the downstream system is not participating in Kafka's commit. So the design has to make replay safe rather than make it impossible. Push idempotency to the boundary — an idempotency key derived from `(topic, partition, offset)` so the downstream can recognise a replay, or a dedupe table keyed on the same thing if the API will not take one. Commit in `onPartitionsRevoked` so a planned rebalance does not replay, and do **not** commit in `onPartitionsLost`, where the partitions are already gone and the commit is both pointless and misleading. The senior framing: with a non-idempotent downstream, exactly-once is not available from the consumer side at all — Kafka transactions only cover Kafka-to-Kafka — so the correct answer is at-least-once plus idempotency at the boundary, stated as a deliberate choice rather than a limitation.
+
+</details>
