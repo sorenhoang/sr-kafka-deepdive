@@ -1,0 +1,68 @@
+{
+  "module": "M7",
+  "title": "Delivery semantics & transactions",
+  "store": "m7-questions",
+  "anchor": "q-m7",
+  "questions": [
+    {
+      "level": "Junior",
+      "done": false,
+      "q": "Define at-most-once, at-least-once and exactly-once, and say which is Kafka's default.",
+      "a": "At-most-once never duplicates and may lose — you get it by committing offsets before processing. At-least-once never loses and may duplicate — commit after processing, with `acks=all` and retries. Exactly-once neither loses nor duplicates, and in Kafka it exists only via transactions and only within Kafka. At-least-once is the default and the honest baseline; most systems that believe they have exactly-once actually have at-least-once with an idempotent sink, which is a fine answer and a different one."
+    },
+    {
+      "level": "Junior",
+      "done": false,
+      "q": "What are the three places duplicates come from?",
+      "a": "**Producer retry** — the write landed but the ack was lost, so the producer sent it again; the idempotent producer solves this, within one session. **Producer restart** — a new instance gets a new producer id, so the broker cannot recognise what the old one wrote; idempotence does not help, transactions do. **Consumer reprocessing** — a crash or rebalance between processing and committing replays the batch; transactions solve it only if the output is also Kafka. Knowing which mechanism addresses which source is the distinction worth having."
+    },
+    {
+      "level": "Junior",
+      "done": false,
+      "q": "What does isolation.level control?",
+      "a": "What a consumer sees of transactional writes. `read_uncommitted` (the default) returns every record, including ones from transactions that later abort — transactions are effectively invisible. `read_committed` returns only records from committed transactions; aborted ones are filtered out client-side, which is why they still occupy offsets and a `read_committed` consumer legitimately sees gaps."
+    },
+    {
+      "level": "Mid",
+      "done": false,
+      "q": "What is the Last Stable Offset and why does it matter operationally?",
+      "a": "The offset of the first record belonging to a still-open transaction. A `read_committed` consumer cannot read past it, because everything before it has a decided outcome and everything after might still abort. Operationally this means an open transaction **blocks** — not slows — every `read_committed` consumer on those partitions until it commits, aborts, or times out. A producer that crashes mid-transaction stalls downstream consumers for up to `transaction.timeout.ms` (60 s default, capped by the broker's 15-minute `transaction.max.timeout.ms`). Your transaction duration becomes downstream latency, which is the strongest argument for keeping transactions short."
+    },
+    {
+      "level": "Mid",
+      "done": false,
+      "q": "Walk through what happens between beginTransaction() and commitTransaction().",
+      "a": "The producer registers each partition it writes to with the **transaction coordinator** — a broker chosen by hashing `transactional.id` to a partition of `__transaction_state`. Records are written to their partitions as normal but are not visible to `read_committed` consumers. `sendOffsetsToTransaction` adds the consumer's offsets to the same transaction. On commit the coordinator performs a two-phase commit: it writes `PREPARE_COMMIT` to `__transaction_state`, which decides the outcome durably; then writes commit **markers** — control records — into every participating partition; then writes `COMPLETE_COMMIT`. Because the state is in a replicated Kafka log, a coordinator failure does not lose the decision: the new coordinator reads the log and finishes."
+    },
+    {
+      "level": "Mid",
+      "done": false,
+      "q": "In a consume-transform-produce loop, which call makes it exactly-once, and what must change on the consumer?",
+      "a": "`sendOffsetsToTransaction(offsets, groupMetadata)`. It writes the consumer's offsets into `__consumer_offsets` **as part of the transaction**, so the output records and the offset commit share one atomic outcome — crash anywhere and either both happened or neither did. The consumer must have `enable.auto.commit=false` and must stop committing its own offsets entirely: the producer now commits on its behalf. That is what closes the reprocessing window that no consumer-side setting can close on its own."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "Explain zombie fencing, and the configuration mistake that silently disables it.",
+      "a": "`initTransactions()` bumps the **epoch** associated with that `transactional.id`. Any older producer instance still holding the previous epoch is fenced: its writes are rejected with `ProducerFenced`. This solves what idempotence cannot — a process partitioned from the cluster but still running, whose replacement has already started, cannot write once the replacement has initialised, so the split-brain duplicate is refused at the broker rather than deduplicated afterwards. **The mistake:** a random, UUID-based or hostname-derived `transactional.id`. The zombie and its replacement then have different ids, so neither fences the other, and a mechanism added specifically for correctness does nothing while appearing configured. For consume-transform-produce the id must be bound to the **input partitions** an instance owns, so that whoever takes over those partitions takes over that identity. This is also why Kafka Streams' EOS matters: before KIP-447 it needed one producer per input partition, so a task over 100 partitions meant 100 producers; `exactly_once_v2` uses one producer per instance and derives fencing from consumer group metadata instead. `exactly_once` and `exactly_once_beta` were removed in 4.0, leaving `exactly_once_v2` as the only value."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "Someone says their pipeline is exactly-once end to end, ending in Postgres. What do you ask?",
+      "a": "Whether Postgres participates in the Kafka transaction — because it cannot. Kafka's exactly-once boundary is **Kafka-to-Kafka**: the atomic unit is output records plus the input offset commit, both inside Kafka. The moment an external system is in the path there is no distributed transaction across the two, and a crash between the database write and the offset commit replays the batch. So the real question is what makes the replay safe. Acceptable answers: an idempotency key derived from `(topic, partition, offset)` that the database enforces with a unique constraint; a dedupe table keyed the same way; or a naturally idempotent operation such as an upsert on a business key. The failure mode to probe for is a pipeline that uses Kafka transactions, concludes it has exactly-once, and writes non-idempotent inserts to Postgres — which has all the cost of transactions and none of the protection where it is actually needed. The honest framing: at-least-once plus idempotency at the boundary is the correct design, and calling it that rather than exactly-once is what keeps the next person from assuming protection that is not there."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "Explain the dual-write problem and why the outbox pattern solves it.",
+      "a": "An application that writes to its database and publishes to Kafka is writing to two systems with no shared transaction. Publish first and the database write can fail, leaving an event for something that never happened. Write first and the publish can fail, leaving state nobody downstream knows about. Retries do not fix this — they only change which inconsistency you get, and a crash between the two leaves no record that the second step was owed. **Outbox:** in one database transaction, write the business row and a row to an `outbox` table. A separate process publishes outbox rows to Kafka — a poller, or CDC reading the write-ahead log with Debezium — and marks them sent. The dual write is gone because there is now one transaction in one system, and publishing becomes a retriable at-least-once delivery of something already durably recorded. Consumers must be idempotent, which they should have been regardless. CDC is usually preferable to polling: no polling lag, no load on the table, and the WAL already has exactly the ordering you want. The principle worth stating, because it generalises well past Kafka: **you cannot make two systems atomic, so arrange for only one of them to need to be.**"
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "A read_committed consumer group's lag stops falling and sits flat, with no errors anywhere. Diagnose it.",
+      "a": "Flat lag with no errors on a `read_committed` consumer points first at a **hanging transaction**: a producer began a transaction, wrote to these partitions, and died or stalled without committing or aborting. The consumer is pinned at the **Last Stable Offset** and cannot advance past the first record of that open transaction — by design, not by failure, which is why nothing is logging an error. Confirm by comparing the LSO against the high watermark on those partitions, and check `__transaction_state` and the transactional producers for one that is stuck. Expect it to resolve itself when `transaction.timeout.ms` expires (60 s by default), so lag that is flat for *minutes* means either a long broker-side `transaction.max.timeout.ms` (up to 15 minutes) or a producer that keeps the transaction alive without completing it. Things to rule out: a `read_uncommitted` consumer on the same partitions still progressing confirms the data is there and the LSO is the cause; and remember that control records and aborted records occupy offsets, so a fully consumed transactional topic can show small non-zero lag normally — flat-and-large is the signal, not non-zero. Longer term this is the argument for short transactions, since every open one is a lower bound on downstream latency. Kafka 4.0 enables transaction version 2 (KIP-890) by default, which bumps the producer epoch per transaction and moves partition registration into a single server-side call, tightening several of the races that produced hanging transactions."
+    }
+  ]
+}

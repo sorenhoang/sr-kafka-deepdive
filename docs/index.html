@@ -236,9 +236,13 @@ pre .c{color:var(--muted)}
     <a class="wip" href="#q-m6"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
+  <nav>
+    <a class="wip" href="#m7"><span class="n">M7</span><span>Delivery semantics</span></a>
+    <a class="wip" href="#q-m7"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
   <h3>Not started</h3>
   <nav>
-    <a class="todo" href="#roadmap"><span class="n">M7</span><span>Transactions</span></a>
   </nav>
 
   <p class="legend"><b>●</b> done &nbsp;·&nbsp; <i>◐</i> in progress &nbsp;·&nbsp; ○ not started<br>A module is done once its lab has been run and its senior questions graded.</p>
@@ -251,7 +255,7 @@ pre .c{color:var(--muted)}
   <p class="qmeta">Targets Apache Kafka 4.x (KRaft-only). Latest release as of 09/2026: 4.3.x.</p>
 
   <h2 id="roadmap">Roadmap — 14 modules</h2>
-  <p>Every module runs the same four steps: walkthrough → this page → hands-on lab → graded question set. Questions are tiered <em>Junior → Mid → Senior</em>; senior answers get written out and graded against <em>missing the point / correct but shallow / senior level</em>.</p>
+  <p>Modules M0-M6 ran four steps: walkthrough → this page → hands-on lab → graded question set. From M7 the labs are dropped by choice and the focus is theory and depth: walkthrough → this page → the full ten-question set, Junior through Senior. Senior answers get graded against <em>missing the point / correct but shallow / senior level</em>.</p>
 
   <div class="scroll"><table>
     <thead><tr><th>Part</th><th>Module</th><th>Core content</th><th>Status</th></tr></thead>
@@ -262,9 +266,9 @@ pre .c{color:var(--muted)}
       <tr><td rowspan="2">B · Core mechanics</td><td class="num">M3</td><td>Replication, ISR, LEO vs high watermark, unclean leader election, data-loss matrix</td><td><code>done</code></td></tr>
       <tr><td class="num">M4</td><td>KRaft: quorum controller, metadata log, why ZooKeeper had to go</td><td><code>done</code></td></tr>
       <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td><code>done</code></td></tr>
-      <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td><code>in progress</code></td></tr>
-      <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td>next</td></tr>
-      <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td>—</td></tr>
+      <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td><code>done</code></td></tr>
+      <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td><code>in progress</code></td></tr>
+      <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td>next</td></tr>
       <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td>—</td></tr>
       <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td>—</td></tr>
       <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td>—</td></tr>
@@ -1090,6 +1094,130 @@ acks                 = all   <span class="c"># producer waits for the whole ISR<
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>You need at-least-once with the smallest possible reprocessing window, and the consumer calls a non-idempotent downstream API. Design it.</span></label></li>
   </ul>
   <p class="qmeta" data-count-for="m6-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 7</p>
+  <h1>Delivery semantics &amp; transactions</h1>
+  <p class="lede">The module where "exactly-once" has to be said precisely or not at all. Kafka does provide it — within a boundary that most people who claim it have not located.</p>
+
+  <h2 id="m7">The three semantics, stated honestly</h2>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Means</th><th>You get it by</th><th>Costs</th></tr></thead>
+    <tbody>
+      <tr><td><strong>At-most-once</strong></td><td>Never duplicated, may be lost</td><td>Commit offsets <em>before</em> processing; <code>acks=0/1</code></td><td>Silent loss</td></tr>
+      <tr><td><strong>At-least-once</strong></td><td>Never lost, may be duplicated</td><td>Commit <em>after</em> processing; <code>acks=all</code>; retries</td><td>Duplicates the application must absorb</td></tr>
+      <tr><td><strong>Exactly-once</strong></td><td>Neither lost nor duplicated</td><td>Transactions, <strong>within Kafka</strong></td><td>Latency, throughput, a reader-side blocking mode, real operational complexity</td></tr>
+    </tbody>
+  </table></div>
+  <p>At-least-once is the default and the honest baseline. Most production systems that believe they have exactly-once have at-least-once plus an idempotent sink, which is a perfectly good answer — and a different one.</p>
+
+  <h3>Where duplicates actually come from</h3>
+  <ol>
+    <li><strong>Producer retry</strong> — the write landed, the ack was lost, the producer retried. Solved by the idempotent producer (M5), per session.</li>
+    <li><strong>Producer restart</strong> — a new PID means the broker cannot recognise the previous instance's writes. Idempotence does not help. Transactions do.</li>
+    <li><strong>Consumer reprocessing</strong> — a crash or rebalance between processing and committing replays the batch. Solved by transactions <em>only if</em> the output is also Kafka.</li>
+  </ol>
+  <p>Naming which of the three a given mechanism addresses is the quickest way to show the distinction is understood rather than memorised.</p>
+
+  <h2>How a Kafka transaction works</h2>
+  <p>A transaction makes a set of writes across multiple partitions — <em>and</em> the consumer offset commit that accompanies them — atomic: all visible, or none.</p>
+
+<pre>producer.initTransactions()        <span class="c">// once, at startup</span>
+producer.beginTransaction()
+producer.send(...)                 <span class="c">// to any partitions, any topics</span>
+producer.sendOffsetsToTransaction(offsets, groupMetadata)
+producer.commitTransaction()       <span class="c">// or abortTransaction()</span></pre>
+
+  <h3>The pieces</h3>
+  <ul>
+    <li><strong><code>transactional.id</code></strong> — a stable, application-chosen identity. It is what makes fencing possible, and it must survive restarts to mean anything.</li>
+    <li><strong>Transaction coordinator</strong> — a broker, chosen by hashing the <code>transactional.id</code> to a partition of the internal <code>__transaction_state</code> topic, the way a group coordinator is chosen from <code>__consumer_offsets</code>.</li>
+    <li><strong>Control records</strong> — commit or abort <em>markers</em> written into every partition the transaction touched. They are records in the log, invisible to applications, which is how a reader knows the outcome without consulting the coordinator.</li>
+  </ul>
+
+  <h3>Commit is two-phase</h3>
+  <ol>
+    <li>The coordinator writes <code>PREPARE_COMMIT</code> to <code>__transaction_state</code>. From here the outcome is decided and will be completed even if brokers restart.</li>
+    <li>It writes commit markers to every participating partition.</li>
+    <li>It writes <code>COMPLETE_COMMIT</code> to <code>__transaction_state</code>.</li>
+  </ol>
+  <p>The state lives in a replicated Kafka log, so a coordinator failure does not lose the decision — the new coordinator reads the log and finishes the job. The same observation as M4, one layer up: Kafka solves its own coordination problems by writing to Kafka.</p>
+
+  <h3>Zombie fencing — why <code>transactional.id</code> must be stable</h3>
+  <p><code>initTransactions()</code> bumps the <strong>epoch</strong> for that <code>transactional.id</code>. Any older producer instance holding the previous epoch is immediately fenced: its writes are rejected with <code>ProducerFenced</code>.</p>
+  <p>This is the mechanism that solves the problem idempotence could not. A process partitioned from the cluster but still running — a "zombie" — cannot write once its replacement has started, so the split-brain write that would otherwise duplicate work is refused at the broker.</p>
+  <div class="callout warn">
+    <span class="tag">The configuration mistake this invites</span>
+    <p>A random or hostname-derived <code>transactional.id</code> silently disables fencing: the zombie and its replacement have different ids, so neither fences the other, and the mechanism you added for correctness does nothing. For consume-transform-produce the id must be <strong>bound to the input partitions</strong> an instance owns, so that whoever takes over those partitions takes over that identity.</p>
+    <p>Which is precisely why Kafka Streams' <code>exactly_once_v2</code> matters: before KIP-447 it needed one producer per input partition, so a task with 100 partitions meant 100 producers. EOS v2 uses one producer per instance and derives fencing from consumer group metadata instead. <code>exactly_once</code> and <code>exactly_once_beta</code> were removed in 4.0 — <code>exactly_once_v2</code> is the only value now.</p>
+  </div>
+
+  <h2>The reader side: isolation level and the LSO</h2>
+  <p><code>isolation.level</code> on the consumer:</p>
+  <ul>
+    <li><code>read_uncommitted</code> (default) — every record, including those from transactions that later abort. Transactions are invisible; you see everything.</li>
+    <li><code>read_committed</code> — only records from committed transactions. Aborted records are filtered out by the consumer, which is why they still occupy offsets.</li>
+  </ul>
+  <p>A <code>read_committed</code> consumer cannot read past the <strong>Last Stable Offset</strong>: the offset of the first record belonging to an open transaction. Everything before the LSO has a known outcome; everything after might still abort.</p>
+
+  <div class="callout warn">
+    <span class="tag">The operational consequence people discover the hard way</span>
+    <p>An open transaction <strong>blocks</strong> every <code>read_committed</code> consumer on those partitions. Not slows — blocks, at the LSO, until the transaction commits, aborts, or times out. A producer that crashes mid-transaction stalls downstream consumers for up to <code>transaction.timeout.ms</code> (60 s by default, capped by the broker's <code>transaction.max.timeout.ms</code> of 15 minutes).</p>
+    <p>So a long-running transaction is not just its own latency: it is a lower bound on every downstream consumer's latency. This is the single strongest argument for keeping transactions short, and it is the thing a candidate who has only read about transactions will not mention.</p>
+  </div>
+
+  <p>Three more reader-side facts worth having: aborted records <strong>consume offsets</strong>, so a <code>read_committed</code> consumer legitimately sees offset gaps — the same lesson as compaction in M2, different cause. Control records also consume offsets, which is why lag can read as non-zero on a fully consumed transactional topic. And <code>read_committed</code> adds latency even when nothing aborts, because the LSO lags the high watermark.</p>
+
+  <h2>Consume-transform-produce, which is what EOS is for</h2>
+  <p>The only pattern transactions genuinely solve: read from Kafka, transform, write to Kafka, atomically.</p>
+<pre>while (true) {
+  records = consumer.poll()
+  producer.beginTransaction()
+  for (r : records) producer.send(transform(r))
+  producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata())
+  producer.commitTransaction()
+}</pre>
+  <p><code>sendOffsetsToTransaction</code> is the load-bearing call. It writes the consumer's offsets to <code>__consumer_offsets</code> <strong>as part of the transaction</strong>, so the offset commit and the output records share one atomic outcome. Crash anywhere and either both happened or neither did — which is what removes the reprocessing window that M6's Q10 could not close.</p>
+  <p>Note what has quietly changed: the consumer no longer commits its own offsets. <code>enable.auto.commit</code> must be off, and the producer commits on the consumer's behalf.</p>
+
+  <h2>What exactly-once does not cover</h2>
+  <p>The boundary is <strong>Kafka-to-Kafka</strong>. The moment an external system is involved — a database, an HTTP API, an email — the transaction cannot include it, because that system is not a participant in Kafka's commit protocol. There is no distributed transaction across the two.</p>
+  <p>So for an external sink the honest design is <strong>at-least-once plus idempotency at the boundary</strong>: an idempotency key derived from <code>(topic, partition, offset)</code>, a dedupe table keyed on the same, or a naturally idempotent operation such as an upsert. Saying this plainly is worth more in an interview than claiming exactly-once and being asked how the database participates.</p>
+
+  <h3>The dual-write problem and the outbox pattern</h3>
+  <p>The mirror image, on the way in: an application that writes to its database <em>and</em> publishes to Kafka has two systems and no shared transaction. Either order fails somewhere — publish first and the database write may fail, leaving an event for something that never happened; write first and the publish may fail, leaving state nobody downstream knows about. Retries do not fix it; they change which inconsistency you get.</p>
+  <p><strong>Outbox:</strong> in one database transaction, write the business row and an <code>outbox</code> row. A separate process — a poller, or CDC with Debezium reading the write-ahead log — publishes outbox rows to Kafka and marks them sent. Now there is only one transaction in one system, and the publish is a retriable, at-least-once delivery of something already durably recorded. Consumers must be idempotent, which they should have been anyway.</p>
+  <p>Worth stating as the general principle: <em>you cannot make two systems atomic, so arrange for only one of them to need to be.</em> That sentence generalises well beyond Kafka and is a good thing to have ready.</p>
+
+  <h2>What transactions cost</h2>
+  <ul>
+    <li><strong>Latency</strong> — coordinator round-trips plus a marker write to every participating partition, per transaction. Small transactions amortise badly; large ones block readers for longer.</li>
+    <li><strong>Reader blocking</strong> — the LSO problem above. Your transaction duration becomes downstream latency.</li>
+    <li><strong>Throughput</strong> — measurably lower than plain idempotent production, and the gap widens with more participating partitions.</li>
+    <li><strong>Operations</strong> — <code>__transaction_state</code> to monitor, hanging transactions to detect, and <code>transactional.id</code> assignment to get right across deploys and scale events.</li>
+  </ul>
+  <p>The current protocol version helps with the worst of this: <strong>transaction version 2</strong> (KIP-890) is enabled on the server by default from Kafka 4.0, controlled by the <code>transaction.version</code> feature flag. It bumps the producer epoch on every transaction so that a transaction can only contain its intended records and duplicates cannot leak into the next one, and it moves partition addition into a single server-side call instead of a client add plus a server verification round-trip. Producers pick it up at the start of their next transaction, without a restart.</p>
+
+  <div class="callout">
+    <span class="tag">Answering "does Kafka support exactly-once?"</span>
+    <p>Yes — for Kafka-to-Kafka pipelines, via transactions that make the output records and the input offset commit atomic, with <code>transactional.id</code> fencing zombie producers and <code>read_committed</code> consumers held at the last stable offset so they never see an uncommitted write. It does not extend to external systems, because they cannot participate in the commit; there, the correct design is at-least-once with idempotency at the boundary. And it costs real latency, throughput and reader blocking, so it is worth it when reprocessing is genuinely unacceptable and not by default.</p>
+  </div>
+
+    <h2 id="q-m7">Interview questions — module 7</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m7-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Define at-most-once, at-least-once and exactly-once, and say which is Kafka's default.</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What are the three places duplicates come from?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What does isolation.level control?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>What is the Last Stable Offset and why does it matter operationally?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Walk through what happens between beginTransaction() and commitTransaction().</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>In a consume-transform-produce loop, which call makes it exactly-once, and what must change on the consumer?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Explain zombie fencing, and the configuration mistake that silently disables it.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Someone says their pipeline is exactly-once end to end, ending in Postgres. What do you ask?</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Explain the dual-write problem and why the outbox pattern solves it.</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A read_committed consumer group's lag stops falling and sits flat, with no errors anywhere. Diagnose it.</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m7-questions">0 / 10</p>
 
 
   <h2 id="a-m0">Model answers — module 0</h2>
