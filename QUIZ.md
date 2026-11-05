@@ -1098,3 +1098,102 @@ MM2 runs on Kafka Connect as three connectors: the source connector copies topic
 What makes it work in practice is rehearsal: a documented, tested failover with known RPO and RTO numbers, monitoring of MM2 replication lag and heartbeats, and the decision of *who* declares a failover made in advance. The summary I would give: multi-cluster turns a Kafka problem into an application-design problem, and failover is never free — you pay in lost tail data and duplicates.
 
 </details>
+
+
+## M11 · Security & multi-tenancy
+
+### Junior
+
+**M11.1** — Name Kafka's four security protocols and say which one production normally uses.
+
+<details>
+<summary>Answer</summary>
+
+`PLAINTEXT` — no encryption, no authentication, principal `ANONYMOUS`. `SSL` — TLS encryption, optionally authenticating the client by certificate (mTLS). `SASL_PLAINTEXT` — SASL authentication with no encryption, so credentials or tokens cross the wire in the clear. `SASL_SSL` — SASL authentication inside TLS. Production normally uses `SASL_SSL`, or `SSL` with mTLS where there is a PKI. Each protocol is bound to a named **listener**, and a broker can run several listeners at once.
+
+</details>
+
+**M11.2** — What is the difference between authentication and authorization in Kafka?
+
+<details>
+<summary>Answer</summary>
+
+**Authentication** establishes who the client is and produces a **principal** such as `User:alice` — from the certificate DN with mTLS, or the username or token subject with SASL. **Authorization** decides what that principal may do, by checking ACLs through the configured authorizer (`StandardAuthorizer` in KRaft). Authentication without authorization means everyone known is allowed everything; authorization without authentication means every client is `ANONYMOUS`, so the ACLs have nothing meaningful to key on.
+
+</details>
+
+**M11.3** — What ACLs does a consumer in a consumer group need?
+
+<details>
+<summary>Answer</summary>
+
+`Read` on the topic **and** `Read` on the consumer group. `Describe` on the topic is implied by `Read`. The group grant is the one people forget: without it the consumer fails with `GroupAuthorizationException` — it cannot join the group or commit offsets — while the topic ACL looks perfectly correct.
+
+</details>
+
+### Mid
+
+**M11.4** — Compare PLAIN, SCRAM, GSSAPI and OAUTHBEARER. When would you pick each?
+
+<details>
+<summary>Answer</summary>
+
+**PLAIN** sends the password as is, so it is only acceptable inside TLS, and the default implementation reads passwords from the broker's JAAS file — adding a user means a restart; production use needs a custom callback handler against an external store. **SCRAM-SHA-256/512** is salted challenge-response: the password never crosses the wire, credentials live in cluster metadata and are managed with `kafka-configs` without restarts — the sensible default when there is no identity provider. **GSSAPI (Kerberos)** fits an organisation already running AD/Kerberos and avoids static secrets in clients, at the cost of making the KDC a dependency of every connection, plus ticket-renewal and clock-skew failures. **OAUTHBEARER** uses short-lived tokens from an identity provider — the best fit for cloud IAM and central identity — but the built-in unsecured JWT handler is development-only; production needs OIDC validation configured. The choice is mostly about where identity already lives in the organisation, not about Kafka.
+
+</details>
+
+**M11.5** — How are ACLs evaluated? Cover deny precedence, prefixed patterns, allow.everyone.if.no.acl.found and super.users.
+
+<details>
+<summary>Answer</summary>
+
+An ACL grants or denies a principal an operation on a resource (`Topic`, `Group`, `Cluster`, `TransactionalId`, `DelegationToken`, `User`) from a host. Patterns are `LITERAL` — including the `*` wildcard — or `PREFIXED`, which matches every resource name starting with a string and is what makes per-team or per-tenant grants manageable. **Any matching deny wins** over any number of allows, regardless of specificity. If no ACL matches, the request is **denied** — unless `allow.everyone.if.no.acl.found=true`, which makes any resource with no ACLs open to all; it exists for migration and is dangerous to leave on because every new topic starts public. Principals in `super.users` skip ACL checks entirely; broker and controller principals must be there (or hold explicit `ClusterAction`), or enabling the authorizer denies the cluster to itself. `Read`, `Write`, `Delete` and `Alter` imply `Describe`.
+
+</details>
+
+**M11.6** — How do quotas work, and why should they be set on users rather than client ids?
+
+<details>
+<summary>Answer</summary>
+
+Quotas cap `producer_byte_rate` and `consumer_byte_rate` per broker, `request_percentage` — share of network and I/O thread time, which catches clients sending many small requests that byte rates never see — and `controller_mutation_rate` for partition creation and deletion. They are enforced by **throttling, not rejection**: the broker computes how long the client must wait to fall back under its quota, delays the response and returns `throttle_time_ms`, so the tenant experiences it as latency. Quotas can target `user`, `client-id`, or the pair, most specific winning. `client.id` is a string the client sets for itself, so a client-id-only quota can be dodged by changing one config value — it is a convention, not a control. Enforceable isolation needs the authenticated principal, so quotas go on `user`, with client-id used to subdivide within a user.
+
+</details>
+
+### Senior
+
+**M11.7** — After enabling TLS on a fetch-heavy cluster, broker CPU roughly doubles and consumer latency rises. Nothing is misconfigured. Explain why, and what you would do.
+
+<details>
+<summary>Answer</summary>
+
+It is the expected cost, and the cause is M2: a plaintext fetch is served with `sendfile`, moving bytes from page cache to the socket without ever entering the JVM. **TLS breaks zero-copy** — the broker must read the bytes into user space to encrypt them, so every fetch now pays a copy into a buffer, encryption CPU, and more memory and GC pressure. Produce-side impact is smaller; fetch-side impact scales with fan-out, because each consumer group re-reads and re-encrypts the same bytes, so a topic read by ten groups pays ten times. The cipher itself is cheap on a modern JDK with AES-NI and TLS 1.3; what does not go away is the lost zero-copy. What to do: first, accept that this is capacity planning that should have happened before the rollout, and size brokers for it — more cores, or more brokers. Make sure batches are compressed end to end, since compressed batches mean fewer bytes to encrypt and the broker passes them through without recompressing. Check that the JDK and TLS settings are not forcing an old protocol or slow cipher suite. Reduce redundant fan-out where several groups read the same data for overlapping purposes. What not to do: turn TLS off for internal clients to save CPU without a deliberate decision that the network is trusted — that trades a known cost for an unknown risk. A senior answer names the mechanism, because without it the CPU graph looks like a regression to chase rather than a price that was always going to be paid.
+
+</details>
+
+**M11.8** — Clients in the cluster's own network work. Clients outside it connect to the bootstrap server, then time out on every produce. Diagnose it.
+
+<details>
+<summary>Answer</summary>
+
+Classic **`advertised.listeners`** failure. The bootstrap connection is only used to fetch metadata; the metadata tells the client the address of each partition leader, and that address is whatever each broker advertises for the listener the client came in on. If it advertises an internal name — a container hostname, a pod IP, a cluster-internal DNS name — internal clients resolve and reach it while external clients cannot, so bootstrap succeeds and every subsequent connection times out. That pattern, *bootstrap works, everything after fails*, is the tell. Confirm by looking at the metadata the client receives (client debug logs, or `kafka-broker-api-versions` / metadata from outside) and checking whether those hosts are resolvable and routable from the client's network. The fix is a separate listener for external traffic — `EXTERNAL://` on its own port — with an advertised address external clients can reach (a load-balancer or per-broker public DNS name; each broker needs its own, because clients must reach specific leaders, not any broker), mapped to its protocol in `listener.security.protocol.map`, while internal clients and inter-broker traffic keep the internal listener. Two related traps: with TLS, hostname verification checks the certificate against the *advertised* name, so a certificate that matches the bootstrap name can still fail after bootstrap; and in Kubernetes a single Service in front of all brokers works for bootstrap and nothing else. The reason this is senior-level is that it looks like a network, firewall or TLS problem, and people spend hours there before reading one line of broker config.
+
+</details>
+
+**M11.9** — Design a shared Kafka platform for twenty internal teams. How do you isolate them, and when would you give a team its own cluster?
+
+<details>
+<summary>Answer</summary>
+
+Kafka has no tenant concept, so isolation is assembled. **Identity:** every team's services authenticate as their own principals — SCRAM or, better, OAUTHBEARER against the company IdP so onboarding and revocation follow existing identity — never a shared account. **Naming:** an enforced prefix per team for topics, consumer groups and transactional ids (`payments.`, `payments-`), created through a self-service pipeline rather than auto-creation, which is off. **Authorization:** `StandardAuthorizer`, `allow.everyone.if.no.acl.found=false`, prefixed ACLs granting each team full rights on its own prefix, and cross-team reads granted explicitly per topic so data sharing is visible and auditable. **Quotas:** byte-rate and `request_percentage` quotas on the authenticated *user*, not client id, plus `controller_mutation_rate` so nobody scripts ten thousand partitions; throttle-time metrics exposed to each team, because throttling presents as latency and teams otherwise file it as a platform bug. **Capacity guardrails:** partition-count and retention limits per team enforced at creation time. **The limits of sharing**, which are the senior part: quotas govern network and request time but not disk or page cache. One team's lagging consumer reading cold data from disk evicts everyone's hot segments from page cache, and long retention fills shared disks; a rebalance storm or a giant message still lands on shared brokers. So I would give a team its own cluster when its traffic dwarfs the others enough that its incidents become everyone's, when it needs a materially different SLO or durability profile, when compliance requires physical isolation of the data or keys, or when its usage pattern — heavy historical replays, very large messages — is hostile to page-cache sharing. The platform then means one way of provisioning many clusters rather than one cluster for everything. The judgement worth stating: shared clusters are efficient for cooperative, observable tenants; separate clusters are cheaper than the incident review about who broke the shared one.
+
+</details>
+
+**M11.10** — You need to turn on authentication and ACLs on a live, previously open cluster without an outage. How do you sequence it?
+
+<details>
+<summary>Answer</summary>
+
+The rule is that each step must be reversible and must not break any existing client. **1. Add, don't replace, listeners:** add a `SASL_SSL` listener alongside the existing `PLAINTEXT` one, with advertised addresses reachable by clients, and roll the brokers. Nothing changes for existing clients. Move inter-broker and controller traffic to secured listeners in their own rolls, and make the broker principals `super.users` (or grant `ClusterAction`) before any authorizer exists. **2. Migrate clients to authenticate:** each service gets its own principal and moves to the new listener. Watch per-listener connection metrics to see who is still on plaintext. **3. Enable the authorizer permissively:** set the `StandardAuthorizer` with `allow.everyone.if.no.acl.found=true`, so resources with no ACLs stay open. Now write ACLs — prefixed per team where naming allows — resource by resource; once a resource has *any* ACL, it is closed to everyone not granted, so do it per resource with the owning team. Use authorizer logging of denials to catch missing grants, especially the forgotten ones: group `Read` for consumers, `TransactionalId` `Write` for transactional producers. **4. Close the defaults:** once denial logs are quiet, set `allow.everyone.if.no.acl.found=false`, then remove the plaintext listener after its connection count reaches zero. **5. Make revocation real:** set `connections.max.reauth.ms`, since without it a connection authenticated before a credential change stays authenticated indefinitely. Rotation is then a process — CA overlap for certificates via dynamic keystore and truststore updates, new-principal-then-cutover for SCRAM — rather than an emergency. The common failure modes are exactly the shortcuts: enabling the authorizer before the brokers are super users (the cluster denies itself), flipping `allow.everyone.if.no.acl.found` to false globally on day one, or removing plaintext while a forgotten batch job still uses it.
+
+</details>

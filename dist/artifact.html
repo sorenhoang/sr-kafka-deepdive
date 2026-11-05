@@ -243,6 +243,11 @@ pre .c{color:var(--muted)}
     <a class="wip" href="#q-m10"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
+  <nav>
+    <a class="wip" href="#m11"><span class="n">M11</span><span>Security</span></a>
+    <a class="wip" href="#q-m11"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
   <h3>Not started</h3>
   <nav>
   </nav>
@@ -273,8 +278,8 @@ pre .c{color:var(--muted)}
       <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td><code>in progress</code></td></tr>
       <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td><code>in progress</code></td></tr>
       <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td><code>in progress</code></td></tr>
-      <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td>next</td></tr>
-      <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td>—</td></tr>
+      <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td><code>in progress</code></td></tr>
+      <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td>next</td></tr>
       <tr><td class="num">M13</td><td>Mock interview, rapid-fire, incident scenarios, senior rubric</td><td>—</td></tr>
     </tbody>
   </table></div>
@@ -1582,6 +1587,134 @@ kafka-reassign-partitions.sh ... --verify   <span class="c">// also removes the 
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design disaster recovery across two regions with MirrorMaker 2. What does failover actually cost?</span></label></li>
   </ul>
   <p class="qmeta" data-count-for="m10-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 11</p>
+  <h1>Security &amp; multi-tenancy</h1>
+  <p class="lede">The module where a cluster stops trusting its network. Most Kafka security incidents are not breaches — they are outages caused by turning security on: clients that can no longer connect, a CPU graph that doubles, or an authorizer that denies the brokers themselves.</p>
+
+  <h2 id="m11">Listeners: one port, one protocol, one name</h2>
+  <p>A broker accepts connections on one or more <strong>listeners</strong>. Each has a name, a host and port, and a security protocol, mapped by <code>listener.security.protocol.map</code>:</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Protocol</th><th>Encrypted</th><th>Authenticated by</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td><code>PLAINTEXT</code></td><td>No</td><td>Nobody — principal is <code>ANONYMOUS</code></td><td>Local development only</td></tr>
+      <tr><td><code>SSL</code></td><td>TLS</td><td>Client certificate, if <code>ssl.client.auth=required</code> (mTLS)</td><td>Service-to-service with a PKI</td></tr>
+      <tr><td><code>SASL_PLAINTEXT</code></td><td>No</td><td>SASL mechanism</td><td>Almost never — credentials or tokens cross the wire in the clear</td></tr>
+      <tr><td><code>SASL_SSL</code></td><td>TLS</td><td>SASL mechanism</td><td>The usual production choice</td></tr>
+    </tbody>
+  </table></div>
+<pre>listeners=INTERNAL://:9092,EXTERNAL://:9093,CONTROLLER://:9094
+advertised.listeners=INTERNAL://kafka-1.svc:9092,EXTERNAL://kafka-1.example.com:9093
+listener.security.protocol.map=INTERNAL:SASL_SSL,EXTERNAL:SASL_SSL,CONTROLLER:SSL
+inter.broker.listener.name=INTERNAL
+controller.listener.names=CONTROLLER   <span class="c">// KRaft: the quorum has its own listener</span></pre>
+  <p>Listener names are arbitrary labels, which is the point: the same protocol can run on two listeners with different settings — a private network with mTLS and a public one with OAuth — and every <code>ssl.*</code> or <code>sasl.*</code> property can be scoped per listener with the <code>listener.name.&lt;name&gt;.</code> prefix.</p>
+
+  <div class="callout warn">
+    <span class="tag">The connection bug everyone hits once</span>
+    <p>A client connects to the bootstrap address only to fetch metadata. From then on it connects to whatever each broker <strong>advertises</strong> for the listener it came in on. If the advertised address is a container name, a pod IP or an internal DNS name, a client outside that network bootstraps successfully, then times out on every produce and fetch. The symptom looks like a network or TLS problem; the cause is one line of broker config. It is also why a TLS hostname-verification error can appear only after bootstrap: the certificate must match the <em>advertised</em> name, not the one you typed.</p>
+  </div>
+
+  <h2>Encryption: TLS, and what it costs</h2>
+  <p>TLS gives confidentiality and integrity in transit and, with <code>ssl.client.auth=required</code>, authenticates the client by certificate (mTLS). Hostname verification (<code>ssl.endpoint.identification.algorithm=https</code>) is on by default on clients; turning it off to make a certificate error go away removes the protection against a man in the middle while keeping the cost.</p>
+  <p>The cost is the interesting part, because it connects back to M2. A plaintext fetch is served with <code>sendfile</code>: bytes go from page cache to socket without entering the JVM. <strong>TLS breaks zero-copy.</strong> The broker must read the bytes into user space to encrypt them, so every fetch now costs a copy, heap or direct buffer pressure, and encryption CPU. Produce-side cost is smaller; consume-side cost scales with fan-out, since each consumer group re-reads and re-encrypts the same data.</p>
+  <ul>
+    <li>Expect broker CPU to rise noticeably on fetch-heavy clusters, and plan the capacity before the rollout, not after.</li>
+    <li>Modern JDKs with AES-NI and TLS 1.3 make the cipher itself cheap; the lost zero-copy and extra copying are what remain.</li>
+    <li>Compression helps twice: fewer bytes to encrypt, and batches stay compressed end to end.</li>
+  </ul>
+
+  <h2>Authentication: who are you?</h2>
+  <p>Authentication produces a <strong>principal</strong>, written <code>User:alice</code>. Everything downstream — ACLs, quotas, audit — keys on it. With mTLS the principal comes from the certificate's distinguished name, reshaped by <code>ssl.principal.mapping.rules</code>; with SASL it is the authenticated username or token subject.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Mechanism</th><th>Credential</th><th>Strength</th><th>Weakness</th></tr></thead>
+    <tbody>
+      <tr><td><code>PLAIN</code></td><td>Username + password, sent as is</td><td>Simple; fine inside TLS</td><td>Default implementation reads passwords from the broker's JAAS file — a restart to add a user. Production use needs a custom callback handler</td></tr>
+      <tr><td><code>SCRAM-SHA-256/512</code></td><td>Salted challenge-response</td><td>Password never crosses the wire; credentials stored in cluster metadata, managed with <code>kafka-configs</code>, no restart</td><td>Still passwords: rotation and distribution are yours</td></tr>
+      <tr><td><code>GSSAPI</code></td><td>Kerberos tickets</td><td>Fits an existing AD/Kerberos estate; no static secrets in clients</td><td>KDC is now a dependency of every connection; ticket renewal and clock skew failures</td></tr>
+      <tr><td><code>OAUTHBEARER</code></td><td>Bearer token (JWT) from an identity provider</td><td>Short-lived tokens, central identity, fits cloud IAM</td><td>The built-in unsecured JWT handler is for development only; production needs OIDC validation configured against your IdP</td></tr>
+    </tbody>
+  </table></div>
+  <p>In KRaft the inter-broker SCRAM user has a chicken-and-egg problem — brokers need the credential to talk to each other before metadata is available — which is solved by adding SCRAM credentials at <code>kafka-storage format</code> time.</p>
+  <p>One detail that matters for rotation: authentication happens <strong>at connection time</strong>. A connection that authenticated with a password you have since changed, or a token that has since expired, stays authenticated unless <code>connections.max.reauth.ms</code> is set — it is 0, disabled, by default. Revoking a credential without it does not disconnect anyone.</p>
+
+  <h2>Authorization: what may you do?</h2>
+  <p>Enabled by setting an authorizer. In KRaft that is <code>org.apache.kafka.metadata.authorizer.StandardAuthorizer</code>, which stores ACLs in the metadata log — the same log from M4 — so ACL changes replicate to every broker the way topic changes do.</p>
+  <p>An ACL is: <em>principal</em> is <em>allowed / denied</em> <em>operation</em> on <em>resource</em> from <em>host</em>. Resource types are <code>Topic</code>, <code>Group</code>, <code>Cluster</code>, <code>TransactionalId</code>, <code>DelegationToken</code> and <code>User</code>; patterns are <code>LITERAL</code> (including the <code>*</code> wildcard) or <code>PREFIXED</code>.</p>
+  <ul>
+    <li><strong>Deny beats allow.</strong> Any matching deny wins over any number of allows, regardless of how specific either is.</li>
+    <li><strong>No match means deny</strong> — unless <code>allow.everyone.if.no.acl.found=true</code>, which turns a resource with no ACLs into an open one. It exists for migration; left on, every new topic is public until someone remembers to lock it.</li>
+    <li><strong><code>super.users</code></strong> bypass ACLs entirely. The broker and controller principals must be in it, or must have explicit <code>ClusterAction</code> grants — otherwise turning on the authorizer denies the cluster to itself.</li>
+    <li><code>Read</code>, <code>Write</code>, <code>Delete</code> and <code>Alter</code> imply <code>Describe</code>; <code>AlterConfigs</code> implies <code>DescribeConfigs</code>.</li>
+  </ul>
+
+  <h3>What each client actually needs</h3>
+  <div class="scroll"><table>
+    <thead><tr><th>Client</th><th>ACLs</th></tr></thead>
+    <tbody>
+      <tr><td>Producer</td><td><code>Write</code> on the topic. Older brokers also wanted <code>IdempotentWrite</code> on <code>Cluster</code> for an idempotent producer; current ones accept topic <code>Write</code> as sufficient — worth knowing when an upgrade suddenly needs one fewer grant, or a downgrade one more</td></tr>
+      <tr><td>Consumer in a group</td><td><code>Read</code> on the topic <strong>and</strong> <code>Read</code> on the group. Missing the second gives <code>GroupAuthorizationException</code> while the topic grant looks correct</td></tr>
+      <tr><td>Transactional producer</td><td><code>Write</code> on the <code>TransactionalId</code>, <code>Write</code> on output topics, and <code>Read</code> on the consumer group if it calls <code>sendOffsetsToTransaction</code></td></tr>
+      <tr><td>Topic auto-creation / admin</td><td><code>Create</code> on the topic or <code>Cluster</code>; <code>Alter</code> / <code>AlterConfigs</code> for changes</td></tr>
+    </tbody>
+  </table></div>
+<pre>kafka-acls.sh --bootstrap-server ... --add \
+  --allow-principal User:orders-svc \
+  --operation Write --topic orders. --resource-pattern-type prefixed
+kafka-acls.sh ... --add --allow-principal User:billing \
+  --operation Read --topic orders. --resource-pattern-type prefixed \
+  --group billing- --resource-pattern-type prefixed   <span class="c">// topic and group both</span></pre>
+  <p>Prefixed ACLs are what make ACLs manageable at all: grant per team or per tenant prefix once, rather than per topic forever. They only work if topic naming is enforced — which is a governance decision, not a Kafka feature.</p>
+
+  <h2>Multi-tenancy: sharing a cluster without sharing the blast radius</h2>
+  <p>Kafka has no tenant object. Multi-tenancy is assembled from three things: <strong>naming</strong> (a tenant prefix on topics, groups and transactional ids), <strong>ACLs</strong> (prefixed grants per tenant principal), and <strong>quotas</strong>.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Quota</th><th>Limits</th></tr></thead>
+    <tbody>
+      <tr><td><code>producer_byte_rate</code></td><td>Bytes/s produced, per broker</td></tr>
+      <tr><td><code>consumer_byte_rate</code></td><td>Bytes/s fetched, per broker</td></tr>
+      <tr><td><code>request_percentage</code></td><td>Share of network and I/O thread time — catches the client that sends tiny requests very fast, which byte rates never see</td></tr>
+      <tr><td><code>controller_mutation_rate</code></td><td>Rate of partition creations and deletions — the tenant who scripts topic creation in a loop</td></tr>
+    </tbody>
+  </table></div>
+  <p>Quotas are enforced by <strong>throttling, not rejection</strong>: the broker computes how long the client must wait to fall back under its rate, delays the response and reports <code>throttle_time_ms</code>. To the tenant it looks like latency, which is why throttle-time metrics have to be visible to them.</p>
+  <div class="callout warn">
+    <span class="tag">client.id is not an identity</span>
+    <p>Quotas can be set on <code>user</code>, <code>client-id</code> or the pair, most specific match wins. But <code>client.id</code> is a string the client chooses. A quota on client-id alone is a politeness convention: any tenant can dodge it by changing a config value. Enforceable isolation needs an authenticated principal, so quotas belong on <code>user</code>, with client-id as a sub-division within it.</p>
+  </div>
+  <p>What quotas do not isolate: disk and page cache. One tenant's lagging consumer reads cold segments from disk and evicts everyone's hot data from page cache (M2), and a tenant with long retention fills shared disks. Shared clusters work when tenants are cooperative and observable; for regulatory isolation, very different SLOs, or a tenant whose traffic dwarfs the rest, a <strong>separate cluster</strong> is the honest answer. Clusters are cheap compared to the meeting about who broke the shared one.</p>
+
+  <h2>What Kafka does not encrypt</h2>
+  <p>Kafka has <strong>no encryption at rest</strong>. Segments on disk are plaintext; anyone with the volume has the data. The options sit outside Kafka: disk or volume encryption (protects against a stolen disk, not a compromised broker), object-store encryption for tiered storage, or <strong>end-to-end encryption</strong> in the client, where brokers only ever see ciphertext. The last is the strongest and the most invasive: key management becomes yours, and compaction compares key bytes, so a compacted topic needs keys encrypted deterministically or left in the clear — otherwise every record looks unique and compaction never removes anything.</p>
+
+  <h2>Rotation, which is where the outages are</h2>
+  <ul>
+    <li><strong>Certificates:</strong> keystores and truststores can be updated on a running broker through dynamic per-listener config, so rotation does not require a rolling restart. Roll the truststore to trust both old and new CA first, then rotate leaf certificates, then remove the old CA — in that order, or something stops trusting something.</li>
+    <li><strong>SCRAM passwords:</strong> one credential per user per mechanism, so changing it is a cut-over. Rotate by introducing a new principal, moving clients, then deleting the old one — and set <code>connections.max.reauth.ms</code> so the old one actually stops working.</li>
+    <li><strong>OAuth:</strong> short token lifetimes do the rotation for you, provided re-authentication is on; otherwise a token that expired an hour ago keeps a connection alive indefinitely.</li>
+  </ul>
+
+  <div class="callout">
+    <span class="tag">Answering "how would you secure a Kafka cluster?"</span>
+    <p>Separate listeners for inter-broker, controller and client traffic, all over TLS, with advertised addresses that are actually reachable by the clients that use them. Authentication via mTLS or SASL — SCRAM where there is no identity provider, OAUTHBEARER where there is one — so every connection has a real principal. The KRaft <code>StandardAuthorizer</code> with <code>allow.everyone.if.no.acl.found=false</code>, prefixed ACLs per team on an enforced naming scheme, and broker principals in <code>super.users</code>. Quotas on authenticated users, not client ids. Re-authentication enabled so revocation means something. And an explicit statement that Kafka does not encrypt at rest, so that is disk encryption or end-to-end encryption by design — with the TLS CPU cost, from losing zero-copy, planned for before the rollout.</p>
+  </div>
+
+    <h2 id="q-m11">Interview questions — module 11</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m11-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Name Kafka's four security protocols and say which one production normally uses.</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What is the difference between authentication and authorization in Kafka?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What ACLs does a consumer in a consumer group need?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Compare PLAIN, SCRAM, GSSAPI and OAUTHBEARER. When would you pick each?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>How are ACLs evaluated? Cover deny precedence, prefixed patterns, allow.everyone.if.no.acl.found and super.users.</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>How do quotas work, and why should they be set on users rather than client ids?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>After enabling TLS on a fetch-heavy cluster, broker CPU roughly doubles and consumer latency rises. Nothing is misconfigured. Explain why, and what you would do.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Clients in the cluster's own network work. Clients outside it connect to the bootstrap server, then time out on every produce. Diagnose it.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design a shared Kafka platform for twenty internal teams. How do you isolate them, and when would you give a team its own cluster?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>You need to turn on authentication and ACLs on a live, previously open cluster without an outage. How do you sequence it?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m11-questions">0 / 10</p>
 
 
   <h2 id="a-m0">Model answers — module 0</h2>
