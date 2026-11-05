@@ -1,0 +1,68 @@
+{
+  "module": "M10",
+  "title": "Sizing, monitoring & production incidents",
+  "store": "m10-questions",
+  "anchor": "q-m10",
+  "questions": [
+    {
+      "level": "Junior",
+      "done": false,
+      "q": "How do you decide how many partitions a topic needs?",
+      "a": "From throughput. Measure what one partition sustains for the producer and for one consumer doing the real processing, then take `max(target / producer_rate, target / consumer_rate)` and pad for growth. The consumer side usually dominates, because consumers do the work. Partition count is also the **ceiling on consumer parallelism** — one partition goes to at most one member of a group — so size for peak parallelism, not today's load."
+    },
+    {
+      "level": "Junior",
+      "done": false,
+      "q": "Why can't you just give every topic 1,000 partitions to be safe?",
+      "a": "Every partition costs something. It is metadata the controller manages and a leader to elect, so failover after a broker death takes longer with more partitions per broker. Each replica holds segments with `.log`, `.index` and `.timeindex` files, so open-file and mmap limits are hit early. The same traffic over more partitions means smaller batches, more requests and worse compression. And every consumer-group rebalance has more partitions to move. Over-provision moderately; do not over-provision by an order of magnitude."
+    },
+    {
+      "level": "Junior",
+      "done": false,
+      "q": "Name the broker metrics you would alert on first, and what each means.",
+      "a": "`UnderReplicatedPartitions` > 0 — a follower has dropped out of the ISR; the best general \"something is wrong\" signal. `UnderMinIsrPartitionCount` > 0 — `acks=all` writes are being rejected right now, which is an outage. `OfflinePartitionsCount` > 0 — partitions with no leader at all. `ActiveControllerCount` summed across the cluster should be exactly 1; 0 means no metadata changes or leader elections can happen. Plus request handler and network processor idle percentages for saturation, and consumer lag measured in time."
+    },
+    {
+      "level": "Mid",
+      "done": false,
+      "q": "What happens when you increase the partition count of an existing keyed topic?",
+      "a": "Existing data stays where it is, but `hash(key) % N` changes, so from that moment many keys map to a different partition than their history. Per-key ordering breaks across the change: old records for a key sit on one partition, new ones on another, consumed by different group members at different speeds. On a **compacted** topic it is worse, because the new value for a key lands in a different partition and never supersedes the old one, so both survive compaction. You can never decrease partitions. That is why partition count is worth over-provisioning on day one, and why a keyed topic that genuinely needs more partitions is often migrated to a new topic instead."
+    },
+    {
+      "level": "Mid",
+      "done": false,
+      "q": "Why is consumer lag in records a poor alerting metric, and what do you use instead?",
+      "a": "Records lag has no unit of urgency: 50,000 records is half a second on a topic doing 100k/s and over an hour on one doing 10/s, so one threshold cannot fit every topic. Alert on **lag in time** — the age of the oldest unconsumed record, or records lag divided by the consume rate — and on the **trend**. Flat lag is a consumer keeping up with a fixed backlog; growing lag is one that will never catch up without help. And note the special case: flat, large lag on a `read_committed` group with no errors is a hanging transaction pinning the consumer at the LSO."
+    },
+    {
+      "level": "Mid",
+      "done": false,
+      "q": "How do you do a safe rolling restart of a Kafka cluster?",
+      "a": "One broker at a time, with controlled shutdown on (the default), so the stopping broker tells the controller and leadership moves off it before it goes away — clients see a leader change rather than an unavailable partition. The rule that makes it safe: **do not stop the next broker until `UnderReplicatedPartitions` is back to zero**. Restarting the next broker while the previous one's replicas are still catching up can take a partition with `RF=3, min.insync.replicas=2` below min ISR, and `acks=all` writes fail. Afterwards, run a preferred leader election (or let `auto.leader.rebalance.enable` do it) so the restarted brokers lead their share again."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "One consumer in a group is permanently behind while the others sit at zero lag. Diagnose it and propose fixes, including what each fix costs.",
+      "a": "One partition lagging while its siblings are at zero is a **key-distribution** problem, not a capacity problem — the distinction matters because the obvious fix, adding consumers, does nothing here: the hot partition can only be consumed by one member. Confirm it: per-partition growth rate (log end offset or size sampled over time) shows one partition outrunning the others; per-partition lag shows the same partition behind; the leader broker for it shows disproportionate bytes-in. Then find the key — sample the partition and count keys; it is usually one tenant, one default or empty key, or one celebrity entity. Also rule out the boring alternative: a poison record or a slow downstream call specific to that partition's data, which shows as processing time per record rather than volume.\n\nFixes, cheapest first. **Re-key** if the key was over-specified — often you needed per-order ordering and keyed by customer. **Salt** the hot key: `key + \"#\" + (n % S)` spreads it over S partitions, at the price that per-key ordering now only holds within each salt, so any consumer that needs the whole key's order has to re-merge by timestamp or sequence number. **Route the hot key** to its own topic with its own consumers, which keeps ordering but adds a topic and routing logic you now own. **Speed up processing** for that consumer — batching downstream writes, for instance — which is fine if the skew is moderate but does not scale. What I would not do: add partitions, because that remaps every key, breaks ordering for all of them, and the hot key still hashes to exactly one partition."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "Produce p99 latency has tripled with no errors anywhere. Walk through how you find the cause.",
+      "a": "Start from the request latency **breakdown** for Produce, because \"slow\" has four different causes and the phases separate them. `RequestQueueTimeMs` high means requests are waiting for a handler thread — check `RequestHandlerAvgIdlePercent`; the broker is saturated on CPU or I/O, often from a reassignment, a traffic increase, or a lagging consumer forcing cold reads that compete with writes. `LocalTimeMs` high means the leader's own append is slow — disk latency, a failing disk, page-cache pressure. `RemoteTimeMs` high means the leader is waiting for followers under `acks=all`: some follower is slow, and the slowest member of the ISR sets the write latency — find which broker, then look at its disk, GC and network, or at whether a replication throttle was left on after a reassignment. `ResponseQueueTimeMs`/`ResponseSendTimeMs` high points at network threads (`NetworkProcessorAvgIdlePercent` — TLS cost and many tiny requests both show here) or slow clients.\n\nThen correlate in time: did it start with a deploy, a reassignment, a broker restart, a new consumer group (more fan-out), or a producer config change that shrank batches (`linger.ms`, many more partitions, compression off)? Check whether it is all brokers or one — one broker is a hardware or placement problem; all brokers is load. Also check the client side: if broker-side latency is flat but client p99 tripled, the time is in the producer — `buffer.memory` exhaustion blocking `send()` (M5), or the network between client and broker. The thing I want to avoid is tuning producer configs before knowing which phase the time is in."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "Two brokers have filled their disks and gone offline. Talk through the incident and the follow-up.",
+      "a": "First, stabilise without making it worse. A log directory with a write error goes offline, and on a single-log-dir broker that takes the broker down, so its partitions are now under-replicated — and with two brokers gone, any partition with replicas on both is likely below `min.insync.replicas` (`acks=all` writes failing) or offline. The rest of the cluster probably filled for the same reason and is close behind, so the first action is cluster-wide: **lower retention on the largest topics** with `kafka-configs.sh` (`retention.ms` / `retention.bytes`) so the surviving brokers delete whole segments themselves and buy headroom. For the dead brokers: add or free disk (expand the volume, or remove non-Kafka files), then start them; they recover their logs and rejoin the ISR. If that is not possible quickly, reassign their partitions to brokers with space — throttled, because an unthrottled reassignment during an incident adds a second one.\n\nWhat not to do: `rm` segment files from under the broker. It leaves indexes, log start offsets and checkpoint files disagreeing with the disk and can turn a capacity incident into data loss or a broker that will not start. Also do not lower `min.insync.replicas` to get producers going without someone explicitly accepting the durability being given up.\n\nFollow-up: find why. Common causes are retention set when traffic was a tenth of today's, a new high-volume topic created with default retention, `retention.bytes` unset so only time bounds it, a low-volume topic whose segments never roll because `segment.ms` defaults to seven days, or tiered storage uploads stuck so local segments are not being released. Then add a disk-usage alert with enough lead time to act — alerting at 85% when retention deletes in segment-sized steps is too late — capacity math as ingress × retention × RF / brokers with real headroom, and per-topic retention review as part of creating topics."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "Design disaster recovery across two regions with MirrorMaker 2. What does failover actually cost?",
+      "a": "MM2 runs on Kafka Connect as three connectors: the source connector copies topics, data and configs; the checkpoint connector emits translated consumer-group offsets; the heartbeat connector proves the link is alive. MirrorMaker 1 was removed in 4.0, so MM2 is the in-tree option.\n\n**Active-passive** is the default recommendation: producers write to the primary, MM2 replicates to the DR cluster, topics arrive prefixed with the source alias (`primary.orders`). On failover, producers are repointed to DR and consumers resume from translated offsets. The costs, stated plainly: **RPO is the replication lag** — whatever MM2 had not copied is lost or stranded in the dead region; **offsets are not shared** — the target has its own offsets, translation goes through periodic sync points and resolves to the nearest earlier one, so consumers resume somewhat *before* where they stopped and reprocess, making failover at-least-once by construction and requiring idempotent consumers; **topic names change** under the default replication policy, so consumers must know to read the prefixed name (or you use `IdentityReplicationPolicy`, which is only safe one-way); and **failback** is a project of its own — the primary has diverged, and you either replicate back and fail over again or rebuild it.\n\n**Active-active** — both regions take writes, each mirrors the other, consumers read local plus remote topics — removes the failover step, but per-key ordering across regions is gone, conflicting writes to the same entity become the application's problem, and every consumer has to merge two topics. I would choose it only when the data is naturally partitioned by region.\n\nWhat makes it work in practice is rehearsal: a documented, tested failover with known RPO and RTO numbers, monitoring of MM2 replication lag and heartbeats, and the decision of *who* declares a failover made in advance. The summary I would give: multi-cluster turns a Kafka problem into an application-design problem, and failover is never free — you pay in lost tail data and duplicates."
+    }
+  ]
+}

@@ -238,6 +238,11 @@ pre .c{color:var(--muted)}
     <a class="wip" href="#q-m9"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
+  <nav>
+    <a class="wip" href="#m10"><span class="n">M10</span><span>Operations</span></a>
+    <a class="wip" href="#q-m10"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
   <h3>Not started</h3>
   <nav>
   </nav>
@@ -267,8 +272,8 @@ pre .c{color:var(--muted)}
       <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td><code>in progress</code></td></tr>
       <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td><code>in progress</code></td></tr>
       <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td><code>in progress</code></td></tr>
-      <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td>next</td></tr>
-      <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td>—</td></tr>
+      <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td><code>in progress</code></td></tr>
+      <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td>next</td></tr>
       <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td>—</td></tr>
       <tr><td class="num">M13</td><td>Mock interview, rapid-fire, incident scenarios, senior rubric</td><td>—</td></tr>
     </tbody>
@@ -1435,6 +1440,148 @@ bytes 5..   [Protobuf only: message-index array, which message in the .proto]
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Kafka Streams or Flink for a new stream-processing workload — how do you decide?</span></label></li>
   </ul>
   <p class="qmeta" data-count-for="m9-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 10</p>
+  <h1>Sizing, monitoring &amp; production incidents</h1>
+  <p class="lede">Everything before this module explained how Kafka works. This one is about how it breaks at 3am — and about the handful of numbers that tell you which way it is breaking before anyone pages you.</p>
+
+  <h2 id="m10">Partition count: the one decision that is hard to undo</h2>
+  <p>The standard formula starts from throughput. Measure what one partition can sustain on your hardware for the producer (<em>P<sub>p</sub></em>) and for one consumer instance doing your real processing (<em>P<sub>c</sub></em>), then for a target throughput <em>T</em>:</p>
+<pre>partitions = max(T / P<sub>p</sub>, T / P<sub>c</sub>)   <span class="c">// then round up for growth</span>
+<span class="c">// 200 MB/s target, producer 20 MB/s/partition, consumer 5 MB/s/partition</span>
+<span class="c">// max(10, 40) = 40 partitions — the consumer is the constraint, as it usually is</span></pre>
+  <p>The consumer side dominates in practice, because consumers do the actual work and producers mostly append. And partition count is the <strong>ceiling on consumer parallelism</strong>: one partition is consumed by at most one member of a group (M1), so 40 partitions means the 41st consumer sits idle no matter how far behind the group is. Size for the parallelism you will need at peak, not today's.</p>
+
+  <h3>Why "just use 1,000" is wrong</h3>
+  <ul>
+    <li><strong>Metadata and controller work</strong> — every partition is state in the metadata log (M4) and a leader to elect. KRaft raised the cluster ceiling a long way, but per-broker cost is still real.</li>
+    <li><strong>Open files</strong> — each partition replica holds segments, and each segment has a <code>.log</code>, <code>.index</code> and <code>.timeindex</code> (M2). File-handle and mmap limits are the classic first wall.</li>
+    <li><strong>Failover time</strong> — when a broker dies, every partition it led needs a new leader. More partitions per broker, longer the window where some of them are unavailable.</li>
+    <li><strong>Batching and latency</strong> — the same traffic spread over more partitions means smaller batches per partition (M5), more requests, worse compression, and replication that has more fetches to keep up with.</li>
+    <li><strong>Rebalance cost</strong> — more partitions to revoke and reassign every time the group changes (M6).</li>
+  </ul>
+
+  <div class="callout warn">
+    <span class="tag">Adding partitions later is not free</span>
+    <p>You can increase partitions; you can never decrease them. And increasing them changes <code>hash(key) % N</code>, so from that moment a key lands on a different partition than its history. Per-key ordering breaks across the boundary — old records for a key on partition 3, new ones on partition 17, consumed by different members at different speeds. On a <strong>compacted</strong> topic it is worse: the old value is never superseded, because the new one lives in a different partition. This is why partition count is the decision to over-provision on day one.</p>
+  </div>
+
+  <h2>Broker sizing: disk and network, multiplied</h2>
+  <p>The two numbers people get wrong are both multiplications they forgot to do.</p>
+<pre><span class="c">// disk, per broker</span>
+ingress × retention × RF / brokers / target_utilisation
+<span class="c">// 50 MB/s × 7 days × 3 / 6 brokers / 0.6  ≈  25 TB per broker</span>
+
+<span class="c">// network egress, cluster-wide</span>
+ingress × (RF − 1)              <span class="c">// followers fetching from leaders</span>
++ ingress × consumer_groups     <span class="c">// every group reads everything it subscribes to</span></pre>
+  <ul>
+    <li><strong>Keep disk well under full.</strong> Retention deletes whole segments, not bytes, and the active segment is never deleted (M2) — the curve has steps in it, and a traffic spike lands on top of the step.</li>
+    <li><strong>Fan-out is egress.</strong> Five consumer groups on a 100 MB/s topic is 500 MB/s out, before replication. The NIC usually saturates before the disk does.</li>
+    <li><strong>Page cache is the read path.</strong> Consumers at the tail are served from memory (M2); a lagging consumer reading cold data turns into disk reads that compete with producer writes. Memory sizing is "enough to hold the hot tail", not heap — the broker heap stays modest on purpose.</li>
+    <li><strong>Tiered storage</strong> (M2) changes the disk equation: local retention covers the hot window, the remote tier covers the rest. It does not change the network equation.</li>
+  </ul>
+
+  <h2>The metrics that actually matter</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Metric</th><th>Healthy</th><th>What non-healthy means</th></tr></thead>
+    <tbody>
+      <tr><td><code>UnderReplicatedPartitions</code></td><td>0</td><td>A follower has fallen out of the ISR (M3). Broker down, disk slow, network saturated, or replication throttled. The single best "something is wrong" signal</td></tr>
+      <tr><td><code>UnderMinIsrPartitionCount</code></td><td>0</td><td>ISR below <code>min.insync.replicas</code>: <code>acks=all</code> producers are being <strong>rejected</strong> right now. This is an outage, not a warning</td></tr>
+      <tr><td><code>OfflinePartitionsCount</code></td><td>0</td><td>No leader at all. Reads and writes fail. Page immediately</td></tr>
+      <tr><td><code>ActiveControllerCount</code></td><td>exactly 1 across the cluster</td><td>0 means no controller — no metadata changes, no leader elections (M4). More than 1 for longer than a moment means something is badly wrong</td></tr>
+      <tr><td><code>RequestHandlerAvgIdlePercent</code></td><td>well above 0.3</td><td>I/O threads saturated; requests queue. Read with the latency breakdown below</td></tr>
+      <tr><td><code>NetworkProcessorAvgIdlePercent</code></td><td>well above 0.3</td><td>Network threads saturated — often TLS cost (M11) or very many small requests</td></tr>
+      <tr><td>Consumer lag</td><td>bounded, not growing</td><td>See below: records lag answers the wrong question</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Request latency is a breakdown, not a number</h3>
+  <p>Every request type reports <code>TotalTimeMs</code> split into phases. Which phase is fat tells you where to look:</p>
+  <ul>
+    <li><code>RequestQueueTimeMs</code> high → request handler threads busy; the broker is CPU- or I/O-bound.</li>
+    <li><code>LocalTimeMs</code> high → the leader's own write is slow: disk, or page-cache pressure.</li>
+    <li><code>RemoteTimeMs</code> high on Produce → waiting for followers under <code>acks=all</code>; a slow follower is setting your write latency (M3).</li>
+    <li><code>ResponseQueueTimeMs</code> / <code>ResponseSendTimeMs</code> high → network threads or the client side is slow to take the response.</li>
+  </ul>
+  <p>A high <code>RemoteTimeMs</code> on Fetch is normal — that is <code>fetch.max.wait.ms</code> doing its job (M6). Knowing which "slow" is by design is half of reading the dashboard.</p>
+
+  <h3>Lag in records is the wrong unit</h3>
+  <p>"50,000 records behind" means nothing without the rate: on a topic doing 100,000 records per second that is half a second; on one doing ten per second it is over an hour. Alert on <strong>lag in time</strong> — how old is the next record the group has not consumed — and on the <strong>trend</strong>. Flat lag is a consumer keeping up with a fixed backlog; growing lag is a consumer that will never catch up without intervention. Flat lag at a large value on a <code>read_committed</code> group is the hanging-transaction signature from M7.</p>
+
+  <h2>Hot partitions</h2>
+  <p>Partition count sets the ceiling on parallelism; key distribution decides whether you reach it. A few keys carrying most of the traffic — one huge tenant, a <code>null</code>-ish default key, a celebrity user — put most of the load on one partition, one leader broker, and one consumer.</p>
+  <p><strong>Diagnosis:</strong> per-partition growth rate (the <code>LogEndOffset</code> or log size per partition, sampled over time) shows one partition outrunning its siblings; per-partition consumer lag shows one partition lagging while the rest are at zero; broker-level, one leader's bytes-in and CPU are out of line with the others. All partitions lagging is a capacity problem; one partition lagging is a key problem — adding consumers fixes the first and does nothing for the second.</p>
+  <p><strong>Fixes, in order of cost:</strong> pick a better key (often the real fix — a tenant id when you only needed per-entity ordering); <strong>salt</strong> the hot key, <code>key + "#" + (n % S)</code>, spreading it across <em>S</em> partitions; or route the known-hot keys to a dedicated topic. Salting has a price you must say out loud: per-key ordering now only holds within each salt, so anything downstream that needs the whole key's order must re-merge, usually by timestamp or sequence number. You traded ordering for throughput — legitimate, but only if you know you did.</p>
+
+  <h2>Moving data: reassignment, leadership, restarts</h2>
+  <h3>Reassignment and throttling</h3>
+  <p><code>kafka-reassign-partitions.sh</code> moves replicas between brokers — to add a broker, drain one, or rebalance disk. The new replica has to copy the partition's entire retained log from the leader, which is the same network and disk the production traffic uses. Unthrottled, a large reassignment is a self-inflicted incident: followers fall behind, <code>UnderReplicatedPartitions</code> climbs, <code>acks=all</code> latency spikes.</p>
+<pre>kafka-reassign-partitions.sh --bootstrap-server ... \
+  --reassignment-json-file plan.json --execute \
+  --throttle 50000000          <span class="c">// bytes/sec for the replication of moving partitions</span>
+kafka-reassign-partitions.sh ... --verify   <span class="c">// also removes the throttle when done — forget it and it stays</span></pre>
+  <p>Move in batches, watch URP between batches, and remember the throttle applies only to the replicas being moved — normal replication is unaffected. Tools that automate this (Cruise Control is the common one) are doing exactly this loop with a model of broker load.</p>
+
+  <h3>Preferred leader election</h3>
+  <p>The first replica in a partition's assignment is its <strong>preferred leader</strong>; assignments are spread so preferred leadership is balanced. After a broker restarts, though, its partitions are led by others, and that broker serves nothing until leadership moves back. <code>auto.leader.rebalance.enable</code> (on by default) does this periodically once a broker's imbalance passes <code>leader.imbalance.per.broker.percentage</code>; <code>kafka-leader-election.sh --election-type preferred</code> does it on demand. A cluster where one broker leads far more than its share is usually just a cluster where this has not run yet.</p>
+
+  <h3>Rolling restarts</h3>
+  <p>With controlled shutdown (the default), a stopping broker tells the controller first, and leadership is moved off it <em>before</em> it goes away — clients see a leader change, not an unavailable partition. The discipline that makes a rolling restart safe is one rule: <strong>do not stop the next broker until <code>UnderReplicatedPartitions</code> is back to zero</strong>. Restart two brokers holding replicas of the same partition too close together and, with <code>RF=3, min.insync.replicas=2</code>, that partition drops below min ISR and <code>acks=all</code> writes fail — the M3 matrix, caused by your own deploy script.</p>
+
+  <h2>Disk full</h2>
+  <p>A log directory that hits a write error is marked offline; on a broker with a single log directory that takes the broker down, and every partition it held goes under-replicated at once. Worse, the brokers usually filled up for the same reason, so they tend to go in quick succession.</p>
+  <div class="callout warn">
+    <span class="tag">Do not <code>rm</code> segment files</span>
+    <p>Deleting segment files by hand from under a broker leaves the indexes, the log start offset and the checkpoint files disagreeing with the disk, and is a reliable way to turn a capacity incident into a data-loss or won't-start incident. The safe levers are: lower <code>retention.ms</code> / <code>retention.bytes</code> on the biggest topics with <code>kafka-configs.sh</code> and let the broker delete whole segments itself; add disk; reassign partitions to brokers with space. Then fix the cause — usually a retention setting nobody revisited after traffic grew, or a low-volume topic whose segments never roll because <code>segment.ms</code> defaults to seven days.</p>
+  </div>
+
+  <h2>MirrorMaker 2 and multi-cluster</h2>
+  <p>MirrorMaker 1 was removed in Kafka 4.0; MirrorMaker 2 is the in-tree option. It runs on Kafka Connect (M9) as three connectors: <strong>MirrorSourceConnector</strong> copies topics, data and topic configs; <strong>MirrorCheckpointConnector</strong> emits consumer-group offset checkpoints; <strong>MirrorHeartbeatConnector</strong> proves the link is alive.</p>
+  <ul>
+    <li><strong>Topic naming.</strong> By default a replicated topic is prefixed with its source cluster alias — <code>us-east.orders</code> — which is what stops active-active replication from looping. <code>IdentityReplicationPolicy</code> keeps the name and is only safe one-way.</li>
+    <li><strong>Offsets do not carry over.</strong> Offset 1,000 in the source is not offset 1,000 in the target — the target log has its own offsets. MM2 records offset-sync points and the checkpoint connector translates group offsets into the target's offsets, optionally writing them straight into the target's groups (<code>sync.group.offsets.enabled</code>).</li>
+    <li><strong>Translation is approximate and behind.</strong> Checkpoints are periodic and resolve to the nearest sync point, so a consumer failing over resumes somewhat <em>earlier</em> than where it stopped. Failover is at-least-once by construction — consumers must be idempotent (M7).</li>
+  </ul>
+  <p><strong>Active-passive</strong>: one cluster takes writes, the other is a replica for disaster recovery. Simple, but failover is a decision someone makes under pressure, with replication lag as the data you lose and a failback that is its own project. <strong>Active-active</strong>: both take writes, each mirrors the other, consumers read local plus remote topics. No failover step, but per-key ordering across regions is gone, conflicting writes to the same entity are the application's problem, and every consumer has to understand the prefixed topics. The honest summary is that multi-cluster turns a Kafka problem into an application-design problem, and failover is never free — the RPO is your replication lag and the cost is duplicates.</p>
+
+  <h2>Incident playbook</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>First suspect</th><th>Confirm with</th><th>Lever</th></tr></thead>
+    <tbody>
+      <tr><td><code>acks=all</code> producers failing with <code>NotEnoughReplicas</code></td><td>ISR below min ISR</td><td><code>UnderMinIsrPartitionCount</code>, which brokers are out of ISR</td><td>Restore the broker; never "fix" by lowering <code>min.insync.replicas</code> without saying what durability you just gave up</td></tr>
+      <tr><td>URP rising across many partitions</td><td>One broker down or slow</td><td>Is it one broker's followers? Its disk / network / GC</td><td>Fix or replace that broker; stop any reassignment in progress</td></tr>
+      <tr><td>Produce latency up, no errors</td><td>Slow follower under <code>acks=all</code>, or saturated handlers</td><td><code>RemoteTimeMs</code> vs <code>RequestQueueTimeMs</code> vs <code>LocalTimeMs</code></td><td>Depends on the phase — this is why the breakdown exists</td></tr>
+      <tr><td>One partition lagging, others at zero</td><td>Hot key</td><td>Per-partition growth rate</td><td>Re-key or salt; more consumers will not help</td></tr>
+      <tr><td>Every partition lagging, growing</td><td>Consumer capacity</td><td>Processing time per record, consumers vs partitions</td><td>Scale consumers up to the partition count; beyond that, more partitions</td></tr>
+      <tr><td>Lag sawtooth, constant rebalances</td><td>Rebalance storm (M6)</td><td>Rebalance rate, <code>max.poll.interval.ms</code> evictions in logs</td><td><code>max.poll.records</code> down, static membership, KIP-848 protocol</td></tr>
+      <tr><td>Flat lag, <code>read_committed</code>, no errors</td><td>Hanging transaction (M7)</td><td>LSO vs high watermark</td><td>Find the stuck producer; wait out or abort the transaction</td></tr>
+      <tr><td>Broker down after disk alarm</td><td>Disk full</td><td>Log dir offline in broker logs</td><td>Lower retention, add disk, reassign — not <code>rm</code></td></tr>
+      <tr><td>Metadata changes hang, no leader elections</td><td>No active controller</td><td><code>ActiveControllerCount</code>, controller quorum health (M4)</td><td>Restore controller quorum majority</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout">
+    <span class="tag">Answering "how would you size and monitor a Kafka cluster?"</span>
+    <p>Partitions from throughput: the larger of target over per-partition producer rate and target over per-partition consumer rate, padded for growth, because partition count is the consumer-parallelism ceiling and increasing it later remaps keys and breaks ordering. Disk from ingress times retention times replication factor, kept well below full because retention deletes in segment steps. Network from the fan-out — replication plus every consumer group — which usually saturates before disk does. Then monitor the few signals that mean something: under-replicated and under-min-ISR partitions, offline partitions, exactly one active controller, handler idle percentages, the request latency breakdown, and consumer lag measured in time and trend rather than records. And the operational rules that prevent self-inflicted outages: throttle reassignments, restart one broker at a time and wait for URP to clear, and never delete segment files by hand.</p>
+  </div>
+
+    <h2 id="q-m10">Interview questions — module 10</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m10-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>How do you decide how many partitions a topic needs?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Why can't you just give every topic 1,000 partitions to be safe?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>Name the broker metrics you would alert on first, and what each means.</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>What happens when you increase the partition count of an existing keyed topic?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Why is consumer lag in records a poor alerting metric, and what do you use instead?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>How do you do a safe rolling restart of a Kafka cluster?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>One consumer in a group is permanently behind while the others sit at zero lag. Diagnose it and propose fixes, including what each fix costs.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Produce p99 latency has tripled with no errors anywhere. Walk through how you find the cause.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Two brokers have filled their disks and gone offline. Talk through the incident and the follow-up.</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design disaster recovery across two regions with MirrorMaker 2. What does failover actually cost?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m10-questions">0 / 10</p>
 
 
   <h2 id="a-m0">Model answers — module 0</h2>
