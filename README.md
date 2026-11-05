@@ -57,7 +57,7 @@ M3, M4 and M5.
 | M10 | Partition sizing, monitoring, production incidents | ready | n/a | |
 | M11 | TLS, SASL, ACLs, multi-tenancy | ready | n/a | |
 | M12 | System design with Kafka | ready | n/a | |
-| M13 | Mock interview, incident scenarios | | | |
+| M13 | Mock interview, incident scenarios | ready | n/a | |
 
 ## Layout
 
