@@ -1,0 +1,68 @@
+{
+  "module": "M13",
+  "title": "Mock interview & incident scenarios",
+  "store": "m13-questions",
+  "anchor": "q-m13",
+  "questions": [
+    {
+      "level": "Junior",
+      "done": false,
+      "q": "In two minutes, explain what Kafka is to someone who knows only RabbitMQ.",
+      "a": "Kafka is a distributed, replicated **commit log**, not a queue. Producers append records to partitions of a topic; records stay for a retention period regardless of whether anyone has read them; consumers track their own position as an offset and can rewind. A queue hands a message to one consumer and deletes it once acknowledged; Kafka lets any number of independent consumer groups read the same data, each at its own pace, and replay it. The trade-offs follow from that: ordering exists only within a partition, parallelism is capped at the partition count per group, and per-message features a broker like RabbitMQ has — routing, per-message acks and redelivery, delayed delivery — are either absent or built on top. Share Groups narrow that last gap by adding queue-style consumption without per-partition ordering."
+    },
+    {
+      "level": "Junior",
+      "done": false,
+      "q": "Which settings decide whether an acknowledged write can be lost, and what does each do?",
+      "a": "**`acks`** on the producer — `acks=all` waits for every in-sync replica. **`replication.factor`** — how many copies exist at all. **`min.insync.replicas`** — the minimum ISR size for an `acks=all` write to be accepted; with RF=3 and `min.insync.replicas=2`, a write fails with `NotEnoughReplicas` rather than being acknowledged by the leader alone. **`unclean.leader.election.enable`** — off by default; if on, a replica that was not in the ISR can become leader and acknowledged writes are silently truncated. Together: RF=3, `min.insync.replicas=2`, `acks=all`, unclean election off is the standard durable configuration, and it trades write availability for durability on purpose."
+    },
+    {
+      "level": "Junior",
+      "done": false,
+      "q": "Why can a consumer group not use more consumers than there are partitions?",
+      "a": "Within a classic consumer group each partition is assigned to exactly one consumer, which is what preserves per-partition ordering and lets one offset per partition describe the group's progress. Consumers beyond the partition count get no assignment and sit idle. So the partition count is the ceiling on a group's parallelism, which is why partition count has to be planned for peak consumer throughput up front — increasing it later moves keys. Share Groups are the exception: they allow more consumers than partitions because they give up per-partition ordering and track acknowledgement per record."
+    },
+    {
+      "level": "Mid",
+      "done": false,
+      "q": "Trace one record from producer.send() to a read_committed consumer's poll(), naming every place it can wait.",
+      "a": "**Producer:** the serializer and partitioner run; the record is appended to a batch in the **accumulator** — `send()` blocks here up to `max.block.ms` if `buffer.memory` is full. The batch waits for `linger.ms` or `batch.size`, or for an in-flight request to finish. The **Sender thread** ships it to the partition leader; with `acks=all` the leader holds the response until every ISR member has fetched it. **Broker:** the leader appends to the active segment in the page cache — no fsync — and the **high watermark** advances once the ISR has replicated it. Retries are bounded by `delivery.timeout.ms`. **If transactional:** the record is invisible to `read_committed` readers until the commit marker is written, so the reader waits at the **Last Stable Offset**. **Consumer:** the background fetcher requests data up to the high watermark (or LSO), waiting up to `fetch.max.wait.ms` for `fetch.min.bytes`; `poll()` returns it from the local buffer, filtering aborted records. The places it can wait: buffer full, linger, in-flight limit, ISR replication, open transaction, fetch min-bytes."
+    },
+    {
+      "level": "Mid",
+      "done": false,
+      "q": "A team asks to increase a topic from 12 to 48 partitions. What do you ask before agreeing?",
+      "a": "**Is it keyed, and does anyone depend on per-key ordering?** Key-to-partition is hash modulo partition count, so existing keys move and, during the transition, records for one key exist in two partitions — a consumer can see new before old. **What is actually slow?** If one partition is hot because of one key, more partitions do nothing for it. If consumers are slow, more partitions only help if you also add consumers, and only up to the new count. **Is it compacted?** The old values for a moved key stay in the old partition and are never compacted away by the new ones. **What about state?** Kafka Streams and other stateful consumers partition state by input partition, so a change is effectively a reset. And the cost side: more partitions mean more files, more replication traffic, more metadata, longer recovery — and the count can never be decreased. If ordering matters, the safer path is a new topic with the right count and a controlled migration."
+    },
+    {
+      "level": "Mid",
+      "done": false,
+      "q": "What does 'consumer lag' mean, and why is a message count the wrong unit for alerting on it?",
+      "a": "Lag is the distance between the log end (high watermark, or LSO for `read_committed`) and the group's committed offset, per partition. A message count does not say whether anyone is harmed: 10,000 messages behind is seconds on a busy topic and hours on a quiet one, so one threshold cannot fit every topic. **Time lag** — how old the oldest unconsumed record is, or how long the consumer would take to catch up at its current rate — maps to what downstream actually experiences and to an SLO. Also watch the trend rather than the value: lag that is large but falling is a consumer catching up; lag that is flat on a `read_committed` group can be a hanging transaction; lag growing on one partition only is a hot key or a poison record."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "Design an order pipeline: an order service writes to Postgres, and fulfilment, billing and analytics react. Make it correct under crashes.",
+      "a": "**Getting events out:** the order service must not write to Postgres and publish to Kafka separately — that is the dual-write problem. Use the **outbox pattern**: write the order row and an outbox row in one database transaction, and publish via CDC (Debezium reading the WAL) to an `orders` topic. One atomic write, then at-least-once publication of something already durable. **Topic design:** key by `order_id` so every event for one order lands in one partition and stays ordered; size partitions for peak consumer throughput; RF=3, `min.insync.replicas=2`. Schemas in a registry with `BACKWARD` compatibility so consumers can upgrade first. **Consumers:** each of fulfilment, billing and analytics is its own consumer group, reading independently at its own pace. Each is **at-least-once with idempotency at its sink** — billing in particular dedupes on `(order_id, event type)` or the event id with a unique constraint, because exactly-once does not extend into its database. Kafka transactions only where a stage is Kafka-to-Kafka, such as an enrichment step. **Failure handling:** a poison record goes to a dead-letter topic after bounded retries rather than blocking the partition; multi-step business flows that can fail midway use a **saga** with compensating events rather than a distributed transaction. The trade-offs to name: per-order ordering but none across orders; CDC adds an operational component; idempotency is the cost of not having distributed transactions."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "A broker's disk fails. Walk through what happens across the cluster, from the controller to the consumers, and what you would check.",
+      "a": "**Detection:** the broker either crashes or marks the log directory offline; it stops fetching and stops heartbeating to the controller quorum. **Controller:** the active KRaft controller fences the broker once its heartbeats lapse, then, for every partition it led, elects a new leader from the **ISR** and writes the change to `__cluster_metadata`; brokers learn it by replaying that log. Partitions where it was only a follower shrink their ISR. **Producers:** get `NotLeaderOrFollower`, refresh metadata, retry against the new leader within `delivery.timeout.ms`; with idempotence on, retries do not duplicate. With RF=3 and `min.insync.replicas=2`, writes continue on two replicas — a second failure would make them fail rather than lose data. **Consumers:** the fetcher fails over to the new leader; the high watermark only covers ISR-replicated data, so no consumer has read anything the new leader lacks. Group and transaction coordinators on that broker move, causing a brief pause. **Check:** under-replicated and under-min-ISR partitions, offline partitions (an RF=1 topic or one whose whole ISR was on that broker), that unclean election stayed off, and leadership balance afterwards. **Recovery:** replace the disk, the broker rejoins and re-replicates as follower, then preferred-leader election rebalances leadership. The senior point is that nothing acknowledged was lost because of the ISR and high-watermark rules, and what would have changed that: RF=1, `min.insync.replicas=1`, or unclean election."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "When would you recommend not using Kafka, and what would you use instead?",
+      "a": "When the workload needs what Kafka does not do natively. **Task queues with per-message semantics** — individual acks, redelivery of one failed message, priorities, delayed retries — fit RabbitMQ or SQS better; Share Groups narrow this but do not add priorities or delay. **Low volume with no replay need** — a few events per second between two services does not justify running a replicated log; a managed queue or even a database table is simpler. **Request/response** — Kafka is asynchronous by design; an RPC framed over two topics is latency and complexity for nothing. **Huge payloads** — store the object in blob storage and send a reference. **Strict global ordering at high throughput** — a single partition is the only global order, which caps throughput. Kafka earns its operational cost when you need a durable, replayable stream read by several independent consumers at high throughput. The answer that scores is the one that names the criteria rather than a list of products — and admits that a managed Kafka changes the operational side of the calculation."
+    },
+    {
+      "level": "Senior",
+      "done": false,
+      "q": "Name three Kafka guarantees that people commonly overstate, and state each one precisely.",
+      "a": "**Ordering** — guaranteed within a partition only, for one producer; across partitions there is no order, and adding partitions remaps keys so a key's order can break during the change. With idempotence on, ordering holds even with up to 5 in-flight requests; without it, retries can reorder. **Durability** — `acks=all` means every *in-sync* replica, which can be one broker; it is only meaningful with `min.insync.replicas` ≥ 2 and unclean election off, and even then writes sit in the page cache, so a correlated power loss across all replicas can lose acknowledged data. **Exactly-once** — holds Kafka-to-Kafka via transactions; it does not cover external sinks, and the idempotent producer alone deduplicates only within one producer session, not across restarts. Bonus: **retention** — a time-based retention is a minimum, not a precise deadline, since only whole closed segments are deleted. The point of the question is whether each claim comes with its boundary attached."
+    }
+  ]
+}

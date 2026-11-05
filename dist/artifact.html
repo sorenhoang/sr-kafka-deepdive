@@ -228,8 +228,34 @@ pre .c{color:var(--muted)}
     <a class="wip" href="#q-m7"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
-  <h3>Not started</h3>
   <nav>
+    <a class="wip" href="#m8"><span class="n">M8</span><span>Schema Registry</span></a>
+    <a class="wip" href="#q-m8"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
+  <nav>
+    <a class="wip" href="#m9"><span class="n">M9</span><span>Connect &amp; Streams</span></a>
+    <a class="wip" href="#q-m9"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
+  <nav>
+    <a class="wip" href="#m10"><span class="n">M10</span><span>Operations</span></a>
+    <a class="wip" href="#q-m10"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
+  <nav>
+    <a class="wip" href="#m11"><span class="n">M11</span><span>Security</span></a>
+    <a class="wip" href="#q-m11"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
+  <nav>
+    <a class="wip" href="#m12"><span class="n">M12</span><span>System design</span></a>
+    <a class="wip" href="#q-m12"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
+  <nav>
+    <a class="wip" href="#m13"><span class="n">M13</span><span>Mock interview</span></a>
+    <a class="wip" href="#q-m13"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
   <p class="legend"><b>●</b> done &nbsp;·&nbsp; <i>◐</i> in progress &nbsp;·&nbsp; ○ not started<br>A module is done once its lab has been run and its senior questions graded.</p>
@@ -255,12 +281,12 @@ pre .c{color:var(--muted)}
       <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td><code>done</code></td></tr>
       <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td><code>done</code></td></tr>
       <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td><code>in progress</code></td></tr>
-      <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td>next</td></tr>
-      <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td>—</td></tr>
-      <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td>—</td></tr>
-      <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td>—</td></tr>
-      <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td>—</td></tr>
-      <tr><td class="num">M13</td><td>Mock interview, rapid-fire, incident scenarios, senior rubric</td><td>—</td></tr>
+      <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td><code>in progress</code></td></tr>
+      <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td><code>in progress</code></td></tr>
+      <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td><code>in progress</code></td></tr>
+      <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td><code>in progress</code></td></tr>
+      <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td><code>in progress</code></td></tr>
+      <tr><td class="num">M13</td><td>Mock interview, rapid-fire, incident scenarios, senior rubric</td><td><code>in progress</code></td></tr>
     </tbody>
   </table></div>
 
@@ -1205,6 +1231,790 @@ producer.commitTransaction()       <span class="c">// or abortTransaction()</spa
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A read_committed consumer group's lag stops falling and sits flat, with no errors anywhere. Diagnose it.</span></label></li>
   </ul>
   <p class="qmeta" data-count-for="m7-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 8</p>
+  <h1>Schemas, the registry &amp; evolution</h1>
+  <p class="lede">Kafka moves bytes and has no opinion about what is in them. Every topic is therefore an API between teams who deploy on different days, and this module is about keeping that API from breaking at 3am on a deploy nobody coordinated.</p>
+
+  <h2 id="m8">The broker does not know what a record is</h2>
+  <p>A record's key and value are byte arrays. The broker stores, replicates and serves them without parsing — which is part of why it is fast (M2: zero-copy only works if nobody looks inside). The consequence is that the <strong>contract lives entirely in the clients</strong>: the producer's serializer and the consumer's deserializer must agree, and nothing in Apache Kafka checks that they do.</p>
+  <p>Schema Registry exists to put that agreement somewhere. It is worth saying precisely what it is: <strong>not part of Apache Kafka</strong>. The common one is Confluent's (source-available, community licence); Apicurio Registry and cloud equivalents such as AWS Glue Schema Registry fill the same role. It is a separate service with its own REST API that stores schemas — in Confluent's case, in a compacted Kafka topic, <code>_schemas</code>, the same trick as M4 and M7.</p>
+
+  <h2>The three formats</h2>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Avro</th><th>Protobuf</th><th>JSON Schema</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Encoding</strong></td><td>Binary, no field tags — <em>needs the writer's schema to decode</em></td><td>Binary, tagged by field number</td><td>Text JSON, validated against a schema</td></tr>
+      <tr><td><strong>Field identity</strong></td><td>Name, resolved writer → reader</td><td>Field <em>number</em>; names are cosmetic on the wire</td><td>Property name</td></tr>
+      <tr><td><strong>Evolution lever</strong></td><td>Defaults</td><td>Never reuse numbers; <code>reserved</code></td><td>Content model (<code>additionalProperties</code>)</td></tr>
+      <tr><td><strong>Size</strong></td><td>Smallest</td><td>Small</td><td>Largest; compresses well</td></tr>
+      <tr><td><strong>Natural fit</strong></td><td>Data pipelines, Connect, analytics</td><td>Services already on gRPC</td><td>Teams that need human-readable payloads</td></tr>
+    </tbody>
+  </table></div>
+  <p>Avro's defining property is the one that makes a registry mandatory rather than nice: the bytes do not carry field names or tags, so a reader cannot decode a record without the exact schema it was written with. It then <strong>resolves</strong> writer schema against its own reader schema — matching by name, filling missing fields from defaults, skipping unknown ones. Evolution in Avro is that resolution step.</p>
+
+  <h2>The wire format</h2>
+<pre>byte 0      magic byte, 0x0
+bytes 1-4   schema id, big-endian int    <span class="c">// global id in the registry</span>
+bytes 5..   [Protobuf only: message-index array, which message in the .proto]
+            the encoded payload</pre>
+  <p>The serializer registers (or looks up) the schema, gets an id, and prefixes it. The deserializer reads the id, fetches the schema once, caches it forever — ids are immutable — and decodes. Five bytes per record buys self-describing data without shipping the schema.</p>
+  <p>Two consequences people miss. The data is now <strong>coupled to the registry</strong>: a record whose id the registry cannot resolve is undecodable, so the registry is as critical as the brokers for anyone reading old data. And a consumer using a plain <code>StringDeserializer</code> on this topic sees five garbage bytes before every value — the most common first symptom of "someone switched this topic to Avro".</p>
+
+  <h2>Subjects, and what a subject is for</h2>
+  <p>A <strong>subject</strong> is the unit the registry versions and checks compatibility against. Which subject a schema lands in is decided by the client's naming strategy:</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Strategy</th><th>Subject</th><th>Means</th></tr></thead>
+    <tbody>
+      <tr><td><code>TopicNameStrategy</code> (default)</td><td><code>&lt;topic&gt;-value</code></td><td>One schema lineage per topic: every record on the topic is the same type</td></tr>
+      <tr><td><code>RecordNameStrategy</code></td><td>fully-qualified record name</td><td>Type evolves independently of topic; compatibility is checked across every topic using it</td></tr>
+      <tr><td><code>TopicRecordNameStrategy</code></td><td><code>&lt;topic&gt;-&lt;record&gt;</code></td><td>Several types per topic, each with its own lineage</td></tr>
+    </tbody>
+  </table></div>
+  <p>This is where a design choice from M1 comes back. Ordering exists only within a partition, so if <code>OrderCreated</code>, <code>OrderPaid</code> and <code>OrderShipped</code> must be seen in order for one order, they must share a topic and a key — which the default strategy forbids, because it allows one type per topic. The fixes are a record-name strategy, or a single envelope/union type (an Avro union or Protobuf <code>oneof</code>, with schema references) under the topic subject. Choosing the topic layout by event ordering and then discovering the registry fights it is a classic sequence.</p>
+
+  <h2>Compatibility modes, and who upgrades first</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Mode</th><th>Guarantees</th><th>Deploy order</th><th>Avro rule of thumb</th></tr></thead>
+    <tbody>
+      <tr><td><code>BACKWARD</code> (default)</td><td>New schema can read data written with the previous one</td><td><strong>Consumers first</strong></td><td>Add fields with defaults; delete fields</td></tr>
+      <tr><td><code>FORWARD</code></td><td>Previous schema can read data written with the new one</td><td><strong>Producers first</strong></td><td>Add fields; delete only fields with defaults</td></tr>
+      <tr><td><code>FULL</code></td><td>Both</td><td>Either order</td><td>Add or delete only fields with defaults</td></tr>
+      <tr><td><code>*_TRANSITIVE</code></td><td>Same, against <em>every</em> earlier version</td><td>As above</td><td>As above</td></tr>
+      <tr><td><code>NONE</code></td><td>Nothing</td><td>Coordinated big-bang</td><td>Anything — and anything breaks</td></tr>
+    </tbody>
+  </table></div>
+  <p>The mode is a statement about <strong>deploy order</strong>, not about schemas. <code>BACKWARD</code> says the new reader handles old data, so readers must be upgraded before any writer produces the new shape. Most teams pick it as a default and then deploy the producer first, which is exactly the order it does not protect.</p>
+
+  <div class="callout warn">
+    <span class="tag">Why non-transitive is a trap on Kafka specifically</span>
+    <p>Non-transitive modes check the new schema against the <em>latest</em> version only. v3 can be compatible with v2, and v2 with v1, while v3 cannot read v1. On a queue that would not matter. On Kafka it does: retention keeps v1 records on disk, compacted topics keep them forever (M2), and a new consumer group with <code>auto.offset.reset=earliest</code> or any replay reads them. If topics are replayed, the honest mode is <code>BACKWARD_TRANSITIVE</code> or <code>FULL_TRANSITIVE</code>.</p>
+  </div>
+
+  <h3>Safe and breaking, per format</h3>
+  <ul>
+    <li><strong>Avro</strong> — the default is the whole game. Adding a field without one is breaking under <code>BACKWARD</code>: the new reader has nothing to fill it with from old data. Renames are breaking unless an <code>aliases</code> entry maps the old name. Changing a type is breaking except for Avro's defined promotions (e.g. <code>int</code> → <code>long</code>).</li>
+    <li><strong>Protobuf</strong> — field numbers are identity. Renaming a field is safe on the wire (it breaks JSON mappings and generated code, which is not nothing); reusing a number is silent corruption, which is why deleted fields should be marked <code>reserved</code>. In proto3 an absent field decodes as its zero value, so "not sent" and "sent as 0" are indistinguishable unless the field is declared <code>optional</code>.</li>
+    <li><strong>JSON Schema</strong> — the pitfall is the content model. In an <em>open</em> model (<code>additionalProperties</code> unset, i.e. true) the old schema already permitted any extra property of any type, so the checker cannot prove old data matches a newly declared property — adding a field can be rejected. In a <em>closed</em> model the reverse problems appear. The rules are not the Avro intuitions; check them rather than assume them.</li>
+  </ul>
+
+  <h2>Why the broker does not validate</h2>
+  <p>Apache Kafka brokers never parse payloads, and adding it would cost the zero-copy path and couple every broker to every schema. So enforcement is client-side and therefore <strong>optional</strong>: any producer with a plain <code>ByteArraySerializer</code> can write anything to any topic it is allowed to write to. Confluent Server adds per-topic broker-side schema-id validation (<code>confluent.value.schema.validation</code>), which checks that the id is registered for the subject — not that the payload actually decodes. Elsewhere, ACLs on who can produce (M11) are the real enforcement.</p>
+  <p>Two client settings matter more than anything above. <code>auto.register.schemas</code> defaults to true, which means a producer deploy <em>is</em> a schema change, made by whatever code happened to compile. In production, set it to false, register schemas from CI where the compatibility check fails the build, and have producers use the registered version (<code>use.latest.version</code>). The registry's compatibility check is only a gate if something cannot route around it.</p>
+
+  <h2>When a record will not deserialize</h2>
+  <p>This is M6's poison pill with a cause attached. Deserialization happens inside <code>poll()</code>, so a record that cannot be decoded — unknown schema id, a writer that bypassed the serializer, an incompatible change — fails <em>before</em> your code sees it. The Java consumer throws a <code>RecordDeserializationException</code> carrying the partition and offset; if nothing catches it the consumer retries the same offset forever, and that partition's lag climbs while every other partition looks healthy.</p>
+  <ul>
+    <li>Catch it, <code>seek()</code> past the offset, and send the raw bytes to a dead-letter topic with headers saying why. Frameworks package this (Spring's <code>ErrorHandlingDeserializer</code>, Connect's <code>errors.tolerance</code> with a DLQ).</li>
+    <li>Skipping is a decision to lose a record. It belongs in a DLQ that someone owns and replays, not in a log line.</li>
+    <li>Keys deserve extra care: changing how a key is serialized changes its bytes, which changes its partition (M1) and its compaction identity (M2). A key schema change is a repartition in disguise.</li>
+  </ul>
+
+  <h2>Contracts and ownership</h2>
+  <p>A topic with a schema is a published API, and the same rules apply: one owning team, a review process for changes, deprecation instead of deletion. The schemas belong in version control next to the producer, checked against the registry in CI. And soft-deleting a schema version in the registry does not delete the data written with it — hard-deleting one makes those records undecodable. Treat schema deletion like deleting a database column that still has rows.</p>
+  <p>This is also where M7's outbox pays off twice: the outbox row is the event's contract, written and reviewed alongside the business change, rather than an afterthought serialized in a message-publishing helper.</p>
+
+  <div class="callout">
+    <span class="tag">Answering "how do you evolve event schemas safely?"</span>
+    <p>Kafka itself is schema-agnostic, so the contract is enforced by clients through a registry — Confluent's or Apicurio, not Apache Kafka — which prefixes each record with a schema id and rejects incompatible changes per subject. The compatibility mode is really a deploy-order decision: <code>BACKWARD</code> means consumers upgrade first, <code>FORWARD</code> producers first, <code>FULL</code> either. Because Kafka retains and replays old data, I'd use the transitive variants, register schemas from CI with auto-registration off, and know the format's rules — Avro defaults, Protobuf's never-reuse-a-field-number, JSON Schema's content model. And I'd plan for the record that still fails: catch the deserialization error, dead-letter it, and keep the partition moving.</p>
+  </div>
+
+    <h2 id="q-m8">Interview questions — module 8</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m8-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Why does Kafka need a schema registry at all, and is it part of Apache Kafka?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What does a record look like on the wire when it uses the Confluent serializers?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>Name the compatibility modes and the default.</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Which side must deploy first under BACKWARD, and under FORWARD? Why?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Give a safe and a breaking change for Avro and for Protobuf.</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>What are subject naming strategies, and when does the default become a problem?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why is non-transitive compatibility a trap on Kafka in particular, and which mode would you choose?</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>One partition of a consumer group has lag climbing steadily while all the others are at zero, and the consumer logs repeat the same error. Diagnose it.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Your team wants to change the type of the message key from a string customer id to a structured Avro record. What do you say?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Avro, Protobuf or JSON Schema for a company's event platform — how do you decide, and what do you enforce regardless?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m8-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 9</p>
+  <h1>Connect, CDC &amp; Kafka Streams</h1>
+  <p class="lede">The ecosystem around the log: Connect moves data in and out, Debezium turns a database's own log into a topic, and Streams processes topics without a separate cluster. Each one is mostly configuration — and each one has a single operational fact that decides whether it works in production.</p>
+
+  <h2 id="m9">Kafka Connect: a runtime, not a library</h2>
+  <p>Connect is a separate JVM process — a <strong>worker</strong> — that runs plugins. You do not write producer or consumer code; you submit JSON config over a REST API and the worker runs it. Three nouns, which interviews mix up:</p>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Is</th><th>Scales by</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Connector</strong></td><td>The logical job: "copy table X to topic Y". Decides how to split the work</td><td>—</td></tr>
+      <tr><td><strong>Task</strong></td><td>The unit that actually moves data. A connector produces up to <code>tasks.max</code> tasks</td><td>Number of tasks, bounded by what the source can be split into</td></tr>
+      <tr><td><strong>Worker</strong></td><td>The process tasks run in</td><td>Adding workers to the same group</td></tr>
+    </tbody>
+  </table></div>
+  <p><code>tasks.max</code> is a ceiling, not a request. A sink reading a 6-partition topic gets at most 6 useful tasks; a Postgres source connector reading one replication slot gets exactly one. Raising <code>tasks.max</code> past what the source can split into does nothing.</p>
+
+  <h3>Distributed mode keeps its state in Kafka</h3>
+  <p>Workers sharing a <code>group.id</code> form a cluster and balance connectors and tasks between them using the group protocol — incremental cooperative rebalancing, so adding a worker moves some tasks rather than stopping all of them. All state lives in three compacted topics:</p>
+  <ul>
+    <li><code>config.storage.topic</code> — connector configs. <strong>Must be one partition</strong>, because config order matters.</li>
+    <li><code>offset.storage.topic</code> — source connector positions (an LSN, a binlog coordinate, a file offset). Sink connectors do not use it: they are ordinary consumers and commit to <code>__consumer_offsets</code> under group <code>connect-&lt;name&gt;</code>.</li>
+    <li><code>status.storage.topic</code> — connector and task state.</li>
+  </ul>
+  <p>The same move as M4 and M7: a distributed system that needs durable coordination state writes it to Kafka. A worker is stateless and replaceable; deleting or mis-retaining these topics is what loses things. They must be compacted, never delete-retention — a source offset expiring means the connector restarts from scratch.</p>
+
+  <h3>Converters and SMTs do different jobs</h3>
+  <ul>
+    <li><strong>Converter</strong> — bytes ↔ Connect's internal record. Set per worker or per connector as <code>key.converter</code> / <code>value.converter</code>: JSON, Avro, Protobuf, String. This is where Schema Registry (M8) plugs in.</li>
+    <li><strong>SMT</strong> (single message transform) — a stateless per-record function: rename a field, route to a different topic, mask a column, extract a key. Optionally gated by a predicate.</li>
+  </ul>
+  <p>SMTs are for shape, not logic. One record in, zero or one out, no state, no lookups, no joins. The moment you want any of those you want Streams or Flink, and an SMT chain that has grown to eight entries is usually a stream processor that nobody admitted to building.</p>
+
+  <h3>Errors, and what the DLQ actually catches</h3>
+  <p><code>errors.tolerance=none</code> (the default) fails the task on the first bad record. <code>all</code> skips it — logged with <code>errors.log.enable</code>, and for sink connectors routed to <code>errors.deadletterqueue.topic.name</code>, with the failure reason in headers if <code>errors.deadletterqueue.context.headers.enable</code> is on.</p>
+  <div class="callout warn">
+    <span class="tag">The gap in the DLQ</span>
+    <p>The dead-letter queue covers failures in <strong>conversion and transformation</strong> — the stages the framework runs. A failure inside the connector's own write to the target, such as a constraint violation in the database, is only routed to the DLQ if the connector reports it through the errant-record reporter (KIP-610). Many do not, so a sink can fail its task on a bad row even with <code>errors.tolerance=all</code> configured. And the DLQ exists only for sinks; a source has nowhere to put a record it could not read.</p>
+    <p><code>errors.tolerance=all</code> without anyone watching the DLQ is at-most-once with extra steps.</p>
+  </div>
+
+  <h3>Delivery semantics on each side</h3>
+  <p><strong>Sinks</strong> are consumers that commit after writing, so they are at-least-once. Exactly-once into an external system is the M7 boundary again: it exists only if the connector makes the write idempotent (upsert on a key, a deterministic file name per offset range) or stores the offsets in the target in the same transaction as the data.</p>
+  <p><strong>Sources</strong> were at-least-once until KIP-618, which added exactly-once source support: with <code>exactly.once.source.support=enabled</code> on the workers, each task writes its records <em>and its source offsets</em> in one Kafka transaction — consume-transform-produce where the "consume" side is an external system. It needs the connector to support it and the cluster to allow transactions, and downstream readers still need <code>read_committed</code> for it to mean anything.</p>
+
+  <h2>CDC with Debezium</h2>
+  <p>Change data capture reads the database's <strong>own replication log</strong> — the Postgres WAL via logical decoding (<code>pgoutput</code>), the MySQL binlog — and emits one event per row change with before and after images. It does not poll tables, so it sees every change including deletes, in commit order, with no load from queries.</p>
+  <p>A connector starts with a <strong>snapshot</strong> — a consistent read of existing rows — then switches to <strong>streaming</strong> from the log position the snapshot was taken at, so nothing falls in the gap. Incremental snapshots let you re-snapshot a table later while streaming continues, which matters because a full blocking snapshot of a large table can take hours.</p>
+  <p>Events are keyed by primary key, so changes to one row land on one partition in order. That is the ordering guarantee: <strong>per row</strong>. Not per transaction and not across tables — a transaction touching an order and its line items produces events on different partitions of different topics, and consumers that need them together have to reassemble them, using Debezium's transaction metadata if enabled.</p>
+
+  <div class="callout warn">
+    <span class="tag">The CDC incident: the replication slot fills the disk</span>
+    <p>Postgres keeps WAL until every <strong>replication slot</strong> has confirmed it. If the Debezium connector stops — crashed task, paused connector, deleted connector with the slot left behind — the slot stops advancing and Postgres retains WAL forever. Disk on the <em>primary database</em> grows until it fills, and a CDC outage becomes a production database outage.</p>
+    <p>The quieter variant: the connector is healthy but watches a low-traffic database on a busy server. WAL is server-wide, so other databases' writes accumulate behind a slot that never sees a change worth confirming. Debezium's <code>heartbeat.interval.ms</code> (with a <code>heartbeat.action.query</code> writing to a heartbeat table) forces periodic progress.</p>
+    <p>Defences: alert on slot lag (<code>pg_replication_slots</code>, retained WAL bytes), set <code>max_slot_wal_keep_size</code> so Postgres invalidates the slot rather than filling the disk — trading a re-snapshot for an outage — and drop slots as part of decommissioning a connector. MySQL fails the other way: the binlog is purged on its own schedule, and a connector down longer than binlog retention has lost its position and must re-snapshot.</p>
+  </div>
+
+  <h3>The outbox, finished</h3>
+  <p>M7's outbox pattern needed a relay from the <code>outbox</code> table to Kafka. Debezium is that relay: it reads outbox inserts from the WAL, and the <strong>outbox event router</strong> SMT routes each row to a topic by its aggregate type and keys it by aggregate id, so events for one aggregate stay ordered. No polling, no "mark as sent" update, and the order is the commit order. Rows can be deleted immediately after insert — the WAL entry is what gets captured.</p>
+
+  <h2>Kafka Streams: a library, not a cluster</h2>
+  <p>Streams is a Java library inside your application. There is no Streams cluster to run: you deploy more instances of your service and they share the work as members of one consumer group (the <code>application.id</code>). Kafka itself is the only infrastructure — for input, output, coordination <em>and state durability</em>.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Abstraction</th><th>A record means</th><th>Backed by</th></tr></thead>
+    <tbody>
+      <tr><td><strong>KStream</strong></td><td>An event. Each one is independent</td><td>A topic, read as a stream</td></tr>
+      <tr><td><strong>KTable</strong></td><td>An update. Latest value per key wins; <code>null</code> deletes</td><td>A local state store over this instance's partitions</td></tr>
+      <tr><td><strong>GlobalKTable</strong></td><td>An update, but every instance holds <em>every</em> partition</td><td>A full local copy per instance</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>State lives locally and is made durable in Kafka</h3>
+  <p>Stateful operations — aggregations, joins, windowing — use <strong>state stores</strong>, RocksDB by default, on local disk. Every write to a store is also written to a compacted <strong>changelog topic</strong>. The local disk is a cache; the changelog is the truth. Lose the instance and another one rebuilds the store by replaying the changelog.</p>
+  <p>That replay is the real recovery cost. A 50 GB store restores at whatever rate the instance can fetch and write RocksDB, and the task does nothing else until it finishes. <strong>Standby replicas</strong> (<code>num.standby.replicas</code>) keep warm copies on other instances so failover is a short catch-up rather than a full restore — the same trade as Kafka's own replication factor, paid in disk and network for recovery time.</p>
+
+  <h3>Tasks, partitions and repartitioning</h3>
+  <p>Streams splits a topology into <strong>tasks</strong>, one per input partition; tasks are distributed across stream threads (<code>num.stream.threads</code>) and instances. Parallelism is capped by partition count, exactly like a consumer group.</p>
+  <p>Any operation that changes the key before a stateful step — <code>selectKey</code>, <code>map</code>, <code>groupBy</code> on a new field — forces a <strong>repartition topic</strong>: Streams writes the records back to Kafka keyed by the new key so that all records for one key reach one task. It is correct and it is a full extra write and read of the data, which is why a topology with three hidden repartitions is three times the traffic it looks like. <code>Topology.describe()</code> shows them.</p>
+  <div class="callout warn">
+    <span class="tag">Co-partitioning — the join requirement that fails at runtime</span>
+    <p>A KStream–KTable or KStream–KStream join works by joining partition <em>n</em> of one input with partition <em>n</em> of the other, inside one task. So both inputs must have the <strong>same number of partitions</strong> and be keyed and partitioned the same way. Mismatched partition counts are rejected when the app starts; a different partitioner on one producer is not detected at all, and the join silently misses. A GlobalKTable is exempt, because every instance has all of it — which is its purpose, and its cost.</p>
+  </div>
+
+  <h3>Exactly-once and time</h3>
+  <p><code>processing.guarantee=exactly_once_v2</code> is M7's consume-transform-produce applied to the whole topology: output records, changelog writes and input offsets commit in one transaction per commit interval. It works because everything Streams touches is Kafka — and stops at the same boundary for anything the application does outside it.</p>
+  <p>Windowed aggregations group by <strong>event time</strong>, the timestamp in the record, not arrival time. Records arriving after their window closed are late; the <strong>grace period</strong> decides how long a window stays open for them, after which they are dropped. Longer grace means more correct results and more state held longer. Results are emitted as updates while the window is open, so a downstream consumer sees intermediate counts unless you use <code>suppress</code> to emit only the final value. The older API defaulted to a 24-hour grace silently; the current API makes you choose one, which is the right default.</p>
+
+  <h2>When Flink instead</h2>
+  <ul>
+    <li><strong>Streams</strong> — Kafka in, Kafka out, logic that belongs inside a service you already deploy, state that restores in acceptable time. No new cluster to operate.</li>
+    <li><strong>Flink</strong> — sources and sinks beyond Kafka, very large state (incremental checkpoints to object storage rather than replaying a changelog), event-time logic across many inputs, SQL as the interface, or a platform team running many jobs centrally.</li>
+  </ul>
+  <p>The honest decision point is operational: Streams costs you nothing new to run but ties recovery time to changelog replay; Flink recovers faster from checkpoints and handles more, at the price of a cluster and a team that understands it.</p>
+
+  <div class="callout">
+    <span class="tag">Answering "how would you get changes from Postgres into Kafka?"</span>
+    <p>CDC with Debezium on Kafka Connect, reading the WAL through a replication slot — not polling, because polling misses deletes and intermediate updates and loads the database. Snapshot first, then stream from the snapshot's position. Ordering is per primary key, not per transaction. The thing I would set up on day one is monitoring of the replication slot's retained WAL, plus <code>max_slot_wal_keep_size</code>, because a stopped connector otherwise fills the primary's disk. If the goal is publishing domain events rather than table changes, I would put an outbox table in front and use the outbox event router, so the topic carries a contract rather than the schema of an internal table.</p>
+  </div>
+
+    <h2 id="q-m9">Interview questions — module 9</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m9-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>What is the difference between a connector, a task and a worker in Kafka Connect?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What is the difference between a KStream, a KTable and a GlobalKTable?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is CDC, and why is reading the database log better than polling a table?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Where does a distributed Connect cluster keep its state, and what goes wrong if those topics are misconfigured?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>What is a repartition topic in Kafka Streams, when is one created, and why should you care?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Converters versus SMTs: what does each do, and where do they stop being the right tool?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Disk on your primary Postgres is filling up, and the growth is pg_wal. You run Debezium. Diagnose it and say how you'd prevent it.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A Kafka Streams app with a large aggregation takes 40 minutes to recover whenever an instance dies. Why, and what are your options?</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Two teams want to join an orders stream against a customers table in Kafka Streams. The join returns nulls for some customers that definitely exist. What do you check?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Kafka Streams or Flink for a new stream-processing workload — how do you decide?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m9-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 10</p>
+  <h1>Sizing, monitoring &amp; production incidents</h1>
+  <p class="lede">Everything before this module explained how Kafka works. This one is about how it breaks at 3am — and about the handful of numbers that tell you which way it is breaking before anyone pages you.</p>
+
+  <h2 id="m10">Partition count: the one decision that is hard to undo</h2>
+  <p>The standard formula starts from throughput. Measure what one partition can sustain on your hardware for the producer (<em>P<sub>p</sub></em>) and for one consumer instance doing your real processing (<em>P<sub>c</sub></em>), then for a target throughput <em>T</em>:</p>
+<pre>partitions = max(T / P<sub>p</sub>, T / P<sub>c</sub>)   <span class="c">// then round up for growth</span>
+<span class="c">// 200 MB/s target, producer 20 MB/s/partition, consumer 5 MB/s/partition</span>
+<span class="c">// max(10, 40) = 40 partitions — the consumer is the constraint, as it usually is</span></pre>
+  <p>The consumer side dominates in practice, because consumers do the actual work and producers mostly append. And partition count is the <strong>ceiling on consumer parallelism</strong>: one partition is consumed by at most one member of a group (M1), so 40 partitions means the 41st consumer sits idle no matter how far behind the group is. Size for the parallelism you will need at peak, not today's.</p>
+
+  <h3>Why "just use 1,000" is wrong</h3>
+  <ul>
+    <li><strong>Metadata and controller work</strong> — every partition is state in the metadata log (M4) and a leader to elect. KRaft raised the cluster ceiling a long way, but per-broker cost is still real.</li>
+    <li><strong>Open files</strong> — each partition replica holds segments, and each segment has a <code>.log</code>, <code>.index</code> and <code>.timeindex</code> (M2). File-handle and mmap limits are the classic first wall.</li>
+    <li><strong>Failover time</strong> — when a broker dies, every partition it led needs a new leader. More partitions per broker, longer the window where some of them are unavailable.</li>
+    <li><strong>Batching and latency</strong> — the same traffic spread over more partitions means smaller batches per partition (M5), more requests, worse compression, and replication that has more fetches to keep up with.</li>
+    <li><strong>Rebalance cost</strong> — more partitions to revoke and reassign every time the group changes (M6).</li>
+  </ul>
+
+  <div class="callout warn">
+    <span class="tag">Adding partitions later is not free</span>
+    <p>You can increase partitions; you can never decrease them. And increasing them changes <code>hash(key) % N</code>, so from that moment a key lands on a different partition than its history. Per-key ordering breaks across the boundary — old records for a key on partition 3, new ones on partition 17, consumed by different members at different speeds. On a <strong>compacted</strong> topic it is worse: the old value is never superseded, because the new one lives in a different partition. This is why partition count is the decision to over-provision on day one.</p>
+  </div>
+
+  <h2>Broker sizing: disk and network, multiplied</h2>
+  <p>The two numbers people get wrong are both multiplications they forgot to do.</p>
+<pre><span class="c">// disk, per broker</span>
+ingress × retention × RF / brokers / target_utilisation
+<span class="c">// 50 MB/s × 7 days × 3 / 6 brokers / 0.6  ≈  25 TB per broker</span>
+
+<span class="c">// network egress, cluster-wide</span>
+ingress × (RF − 1)              <span class="c">// followers fetching from leaders</span>
++ ingress × consumer_groups     <span class="c">// every group reads everything it subscribes to</span></pre>
+  <ul>
+    <li><strong>Keep disk well under full.</strong> Retention deletes whole segments, not bytes, and the active segment is never deleted (M2) — the curve has steps in it, and a traffic spike lands on top of the step.</li>
+    <li><strong>Fan-out is egress.</strong> Five consumer groups on a 100 MB/s topic is 500 MB/s out, before replication. The NIC usually saturates before the disk does.</li>
+    <li><strong>Page cache is the read path.</strong> Consumers at the tail are served from memory (M2); a lagging consumer reading cold data turns into disk reads that compete with producer writes. Memory sizing is "enough to hold the hot tail", not heap — the broker heap stays modest on purpose.</li>
+    <li><strong>Tiered storage</strong> (M2) changes the disk equation: local retention covers the hot window, the remote tier covers the rest. It does not change the network equation.</li>
+  </ul>
+
+  <h2>The metrics that actually matter</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Metric</th><th>Healthy</th><th>What non-healthy means</th></tr></thead>
+    <tbody>
+      <tr><td><code>UnderReplicatedPartitions</code></td><td>0</td><td>A follower has fallen out of the ISR (M3). Broker down, disk slow, network saturated, or replication throttled. The single best "something is wrong" signal</td></tr>
+      <tr><td><code>UnderMinIsrPartitionCount</code></td><td>0</td><td>ISR below <code>min.insync.replicas</code>: <code>acks=all</code> producers are being <strong>rejected</strong> right now. This is an outage, not a warning</td></tr>
+      <tr><td><code>OfflinePartitionsCount</code></td><td>0</td><td>No leader at all. Reads and writes fail. Page immediately</td></tr>
+      <tr><td><code>ActiveControllerCount</code></td><td>exactly 1 across the cluster</td><td>0 means no controller — no metadata changes, no leader elections (M4). More than 1 for longer than a moment means something is badly wrong</td></tr>
+      <tr><td><code>RequestHandlerAvgIdlePercent</code></td><td>well above 0.3</td><td>I/O threads saturated; requests queue. Read with the latency breakdown below</td></tr>
+      <tr><td><code>NetworkProcessorAvgIdlePercent</code></td><td>well above 0.3</td><td>Network threads saturated — often TLS cost (M11) or very many small requests</td></tr>
+      <tr><td>Consumer lag</td><td>bounded, not growing</td><td>See below: records lag answers the wrong question</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Request latency is a breakdown, not a number</h3>
+  <p>Every request type reports <code>TotalTimeMs</code> split into phases. Which phase is fat tells you where to look:</p>
+  <ul>
+    <li><code>RequestQueueTimeMs</code> high → request handler threads busy; the broker is CPU- or I/O-bound.</li>
+    <li><code>LocalTimeMs</code> high → the leader's own write is slow: disk, or page-cache pressure.</li>
+    <li><code>RemoteTimeMs</code> high on Produce → waiting for followers under <code>acks=all</code>; a slow follower is setting your write latency (M3).</li>
+    <li><code>ResponseQueueTimeMs</code> / <code>ResponseSendTimeMs</code> high → network threads or the client side is slow to take the response.</li>
+  </ul>
+  <p>A high <code>RemoteTimeMs</code> on Fetch is normal — that is <code>fetch.max.wait.ms</code> doing its job (M6). Knowing which "slow" is by design is half of reading the dashboard.</p>
+
+  <h3>Lag in records is the wrong unit</h3>
+  <p>"50,000 records behind" means nothing without the rate: on a topic doing 100,000 records per second that is half a second; on one doing ten per second it is over an hour. Alert on <strong>lag in time</strong> — how old is the next record the group has not consumed — and on the <strong>trend</strong>. Flat lag is a consumer keeping up with a fixed backlog; growing lag is a consumer that will never catch up without intervention. Flat lag at a large value on a <code>read_committed</code> group is the hanging-transaction signature from M7.</p>
+
+  <h2>Hot partitions</h2>
+  <p>Partition count sets the ceiling on parallelism; key distribution decides whether you reach it. A few keys carrying most of the traffic — one huge tenant, a <code>null</code>-ish default key, a celebrity user — put most of the load on one partition, one leader broker, and one consumer.</p>
+  <p><strong>Diagnosis:</strong> per-partition growth rate (the <code>LogEndOffset</code> or log size per partition, sampled over time) shows one partition outrunning its siblings; per-partition consumer lag shows one partition lagging while the rest are at zero; broker-level, one leader's bytes-in and CPU are out of line with the others. All partitions lagging is a capacity problem; one partition lagging is a key problem — adding consumers fixes the first and does nothing for the second.</p>
+  <p><strong>Fixes, in order of cost:</strong> pick a better key (often the real fix — a tenant id when you only needed per-entity ordering); <strong>salt</strong> the hot key, <code>key + "#" + (n % S)</code>, spreading it across <em>S</em> partitions; or route the known-hot keys to a dedicated topic. Salting has a price you must say out loud: per-key ordering now only holds within each salt, so anything downstream that needs the whole key's order must re-merge, usually by timestamp or sequence number. You traded ordering for throughput — legitimate, but only if you know you did.</p>
+
+  <h2>Moving data: reassignment, leadership, restarts</h2>
+  <h3>Reassignment and throttling</h3>
+  <p><code>kafka-reassign-partitions.sh</code> moves replicas between brokers — to add a broker, drain one, or rebalance disk. The new replica has to copy the partition's entire retained log from the leader, which is the same network and disk the production traffic uses. Unthrottled, a large reassignment is a self-inflicted incident: followers fall behind, <code>UnderReplicatedPartitions</code> climbs, <code>acks=all</code> latency spikes.</p>
+<pre>kafka-reassign-partitions.sh --bootstrap-server ... \
+  --reassignment-json-file plan.json --execute \
+  --throttle 50000000          <span class="c">// bytes/sec for the replication of moving partitions</span>
+kafka-reassign-partitions.sh ... --verify   <span class="c">// also removes the throttle when done — forget it and it stays</span></pre>
+  <p>Move in batches, watch URP between batches, and remember the throttle applies only to the replicas being moved — normal replication is unaffected. Tools that automate this (Cruise Control is the common one) are doing exactly this loop with a model of broker load.</p>
+
+  <h3>Preferred leader election</h3>
+  <p>The first replica in a partition's assignment is its <strong>preferred leader</strong>; assignments are spread so preferred leadership is balanced. After a broker restarts, though, its partitions are led by others, and that broker serves nothing until leadership moves back. <code>auto.leader.rebalance.enable</code> (on by default) does this periodically once a broker's imbalance passes <code>leader.imbalance.per.broker.percentage</code>; <code>kafka-leader-election.sh --election-type preferred</code> does it on demand. A cluster where one broker leads far more than its share is usually just a cluster where this has not run yet.</p>
+
+  <h3>Rolling restarts</h3>
+  <p>With controlled shutdown (the default), a stopping broker tells the controller first, and leadership is moved off it <em>before</em> it goes away — clients see a leader change, not an unavailable partition. The discipline that makes a rolling restart safe is one rule: <strong>do not stop the next broker until <code>UnderReplicatedPartitions</code> is back to zero</strong>. Restart two brokers holding replicas of the same partition too close together and, with <code>RF=3, min.insync.replicas=2</code>, that partition drops below min ISR and <code>acks=all</code> writes fail — the M3 matrix, caused by your own deploy script.</p>
+
+  <h2>Disk full</h2>
+  <p>A log directory that hits a write error is marked offline; on a broker with a single log directory that takes the broker down, and every partition it held goes under-replicated at once. Worse, the brokers usually filled up for the same reason, so they tend to go in quick succession.</p>
+  <div class="callout warn">
+    <span class="tag">Do not <code>rm</code> segment files</span>
+    <p>Deleting segment files by hand from under a broker leaves the indexes, the log start offset and the checkpoint files disagreeing with the disk, and is a reliable way to turn a capacity incident into a data-loss or won't-start incident. The safe levers are: lower <code>retention.ms</code> / <code>retention.bytes</code> on the biggest topics with <code>kafka-configs.sh</code> and let the broker delete whole segments itself; add disk; reassign partitions to brokers with space. Then fix the cause — usually a retention setting nobody revisited after traffic grew, or a low-volume topic whose segments never roll because <code>segment.ms</code> defaults to seven days.</p>
+  </div>
+
+  <h2>MirrorMaker 2 and multi-cluster</h2>
+  <p>MirrorMaker 1 was removed in Kafka 4.0; MirrorMaker 2 is the in-tree option. It runs on Kafka Connect (M9) as three connectors: <strong>MirrorSourceConnector</strong> copies topics, data and topic configs; <strong>MirrorCheckpointConnector</strong> emits consumer-group offset checkpoints; <strong>MirrorHeartbeatConnector</strong> proves the link is alive.</p>
+  <ul>
+    <li><strong>Topic naming.</strong> By default a replicated topic is prefixed with its source cluster alias — <code>us-east.orders</code> — which is what stops active-active replication from looping. <code>IdentityReplicationPolicy</code> keeps the name and is only safe one-way.</li>
+    <li><strong>Offsets do not carry over.</strong> Offset 1,000 in the source is not offset 1,000 in the target — the target log has its own offsets. MM2 records offset-sync points and the checkpoint connector translates group offsets into the target's offsets, optionally writing them straight into the target's groups (<code>sync.group.offsets.enabled</code>).</li>
+    <li><strong>Translation is approximate and behind.</strong> Checkpoints are periodic and resolve to the nearest sync point, so a consumer failing over resumes somewhat <em>earlier</em> than where it stopped. Failover is at-least-once by construction — consumers must be idempotent (M7).</li>
+  </ul>
+  <p><strong>Active-passive</strong>: one cluster takes writes, the other is a replica for disaster recovery. Simple, but failover is a decision someone makes under pressure, with replication lag as the data you lose and a failback that is its own project. <strong>Active-active</strong>: both take writes, each mirrors the other, consumers read local plus remote topics. No failover step, but per-key ordering across regions is gone, conflicting writes to the same entity are the application's problem, and every consumer has to understand the prefixed topics. The honest summary is that multi-cluster turns a Kafka problem into an application-design problem, and failover is never free — the RPO is your replication lag and the cost is duplicates.</p>
+
+  <h2>Incident playbook</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Symptom</th><th>First suspect</th><th>Confirm with</th><th>Lever</th></tr></thead>
+    <tbody>
+      <tr><td><code>acks=all</code> producers failing with <code>NotEnoughReplicas</code></td><td>ISR below min ISR</td><td><code>UnderMinIsrPartitionCount</code>, which brokers are out of ISR</td><td>Restore the broker; never "fix" by lowering <code>min.insync.replicas</code> without saying what durability you just gave up</td></tr>
+      <tr><td>URP rising across many partitions</td><td>One broker down or slow</td><td>Is it one broker's followers? Its disk / network / GC</td><td>Fix or replace that broker; stop any reassignment in progress</td></tr>
+      <tr><td>Produce latency up, no errors</td><td>Slow follower under <code>acks=all</code>, or saturated handlers</td><td><code>RemoteTimeMs</code> vs <code>RequestQueueTimeMs</code> vs <code>LocalTimeMs</code></td><td>Depends on the phase — this is why the breakdown exists</td></tr>
+      <tr><td>One partition lagging, others at zero</td><td>Hot key</td><td>Per-partition growth rate</td><td>Re-key or salt; more consumers will not help</td></tr>
+      <tr><td>Every partition lagging, growing</td><td>Consumer capacity</td><td>Processing time per record, consumers vs partitions</td><td>Scale consumers up to the partition count; beyond that, more partitions</td></tr>
+      <tr><td>Lag sawtooth, constant rebalances</td><td>Rebalance storm (M6)</td><td>Rebalance rate, <code>max.poll.interval.ms</code> evictions in logs</td><td><code>max.poll.records</code> down, static membership, KIP-848 protocol</td></tr>
+      <tr><td>Flat lag, <code>read_committed</code>, no errors</td><td>Hanging transaction (M7)</td><td>LSO vs high watermark</td><td>Find the stuck producer; wait out or abort the transaction</td></tr>
+      <tr><td>Broker down after disk alarm</td><td>Disk full</td><td>Log dir offline in broker logs</td><td>Lower retention, add disk, reassign — not <code>rm</code></td></tr>
+      <tr><td>Metadata changes hang, no leader elections</td><td>No active controller</td><td><code>ActiveControllerCount</code>, controller quorum health (M4)</td><td>Restore controller quorum majority</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout">
+    <span class="tag">Answering "how would you size and monitor a Kafka cluster?"</span>
+    <p>Partitions from throughput: the larger of target over per-partition producer rate and target over per-partition consumer rate, padded for growth, because partition count is the consumer-parallelism ceiling and increasing it later remaps keys and breaks ordering. Disk from ingress times retention times replication factor, kept well below full because retention deletes in segment steps. Network from the fan-out — replication plus every consumer group — which usually saturates before disk does. Then monitor the few signals that mean something: under-replicated and under-min-ISR partitions, offline partitions, exactly one active controller, handler idle percentages, the request latency breakdown, and consumer lag measured in time and trend rather than records. And the operational rules that prevent self-inflicted outages: throttle reassignments, restart one broker at a time and wait for URP to clear, and never delete segment files by hand.</p>
+  </div>
+
+    <h2 id="q-m10">Interview questions — module 10</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m10-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>How do you decide how many partitions a topic needs?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Why can't you just give every topic 1,000 partitions to be safe?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>Name the broker metrics you would alert on first, and what each means.</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>What happens when you increase the partition count of an existing keyed topic?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Why is consumer lag in records a poor alerting metric, and what do you use instead?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>How do you do a safe rolling restart of a Kafka cluster?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>One consumer in a group is permanently behind while the others sit at zero lag. Diagnose it and propose fixes, including what each fix costs.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Produce p99 latency has tripled with no errors anywhere. Walk through how you find the cause.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Two brokers have filled their disks and gone offline. Talk through the incident and the follow-up.</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design disaster recovery across two regions with MirrorMaker 2. What does failover actually cost?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m10-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 11</p>
+  <h1>Security &amp; multi-tenancy</h1>
+  <p class="lede">The module where a cluster stops trusting its network. Most Kafka security incidents are not breaches — they are outages caused by turning security on: clients that can no longer connect, a CPU graph that doubles, or an authorizer that denies the brokers themselves.</p>
+
+  <h2 id="m11">Listeners: one port, one protocol, one name</h2>
+  <p>A broker accepts connections on one or more <strong>listeners</strong>. Each has a name, a host and port, and a security protocol, mapped by <code>listener.security.protocol.map</code>:</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Protocol</th><th>Encrypted</th><th>Authenticated by</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td><code>PLAINTEXT</code></td><td>No</td><td>Nobody — principal is <code>ANONYMOUS</code></td><td>Local development only</td></tr>
+      <tr><td><code>SSL</code></td><td>TLS</td><td>Client certificate, if <code>ssl.client.auth=required</code> (mTLS)</td><td>Service-to-service with a PKI</td></tr>
+      <tr><td><code>SASL_PLAINTEXT</code></td><td>No</td><td>SASL mechanism</td><td>Almost never — credentials or tokens cross the wire in the clear</td></tr>
+      <tr><td><code>SASL_SSL</code></td><td>TLS</td><td>SASL mechanism</td><td>The usual production choice</td></tr>
+    </tbody>
+  </table></div>
+<pre>listeners=INTERNAL://:9092,EXTERNAL://:9093,CONTROLLER://:9094
+advertised.listeners=INTERNAL://kafka-1.svc:9092,EXTERNAL://kafka-1.example.com:9093
+listener.security.protocol.map=INTERNAL:SASL_SSL,EXTERNAL:SASL_SSL,CONTROLLER:SSL
+inter.broker.listener.name=INTERNAL
+controller.listener.names=CONTROLLER   <span class="c">// KRaft: the quorum has its own listener</span></pre>
+  <p>Listener names are arbitrary labels, which is the point: the same protocol can run on two listeners with different settings — a private network with mTLS and a public one with OAuth — and every <code>ssl.*</code> or <code>sasl.*</code> property can be scoped per listener with the <code>listener.name.&lt;name&gt;.</code> prefix.</p>
+
+  <div class="callout warn">
+    <span class="tag">The connection bug everyone hits once</span>
+    <p>A client connects to the bootstrap address only to fetch metadata. From then on it connects to whatever each broker <strong>advertises</strong> for the listener it came in on. If the advertised address is a container name, a pod IP or an internal DNS name, a client outside that network bootstraps successfully, then times out on every produce and fetch. The symptom looks like a network or TLS problem; the cause is one line of broker config. It is also why a TLS hostname-verification error can appear only after bootstrap: the certificate must match the <em>advertised</em> name, not the one you typed.</p>
+  </div>
+
+  <h2>Encryption: TLS, and what it costs</h2>
+  <p>TLS gives confidentiality and integrity in transit and, with <code>ssl.client.auth=required</code>, authenticates the client by certificate (mTLS). Hostname verification (<code>ssl.endpoint.identification.algorithm=https</code>) is on by default on clients; turning it off to make a certificate error go away removes the protection against a man in the middle while keeping the cost.</p>
+  <p>The cost is the interesting part, because it connects back to M2. A plaintext fetch is served with <code>sendfile</code>: bytes go from page cache to socket without entering the JVM. <strong>TLS breaks zero-copy.</strong> The broker must read the bytes into user space to encrypt them, so every fetch now costs a copy, heap or direct buffer pressure, and encryption CPU. Produce-side cost is smaller; consume-side cost scales with fan-out, since each consumer group re-reads and re-encrypts the same data.</p>
+  <ul>
+    <li>Expect broker CPU to rise noticeably on fetch-heavy clusters, and plan the capacity before the rollout, not after.</li>
+    <li>Modern JDKs with AES-NI and TLS 1.3 make the cipher itself cheap; the lost zero-copy and extra copying are what remain.</li>
+    <li>Compression helps twice: fewer bytes to encrypt, and batches stay compressed end to end.</li>
+  </ul>
+
+  <h2>Authentication: who are you?</h2>
+  <p>Authentication produces a <strong>principal</strong>, written <code>User:alice</code>. Everything downstream — ACLs, quotas, audit — keys on it. With mTLS the principal comes from the certificate's distinguished name, reshaped by <code>ssl.principal.mapping.rules</code>; with SASL it is the authenticated username or token subject.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Mechanism</th><th>Credential</th><th>Strength</th><th>Weakness</th></tr></thead>
+    <tbody>
+      <tr><td><code>PLAIN</code></td><td>Username + password, sent as is</td><td>Simple; fine inside TLS</td><td>Default implementation reads passwords from the broker's JAAS file — a restart to add a user. Production use needs a custom callback handler</td></tr>
+      <tr><td><code>SCRAM-SHA-256/512</code></td><td>Salted challenge-response</td><td>Password never crosses the wire; credentials stored in cluster metadata, managed with <code>kafka-configs</code>, no restart</td><td>Still passwords: rotation and distribution are yours</td></tr>
+      <tr><td><code>GSSAPI</code></td><td>Kerberos tickets</td><td>Fits an existing AD/Kerberos estate; no static secrets in clients</td><td>KDC is now a dependency of every connection; ticket renewal and clock skew failures</td></tr>
+      <tr><td><code>OAUTHBEARER</code></td><td>Bearer token (JWT) from an identity provider</td><td>Short-lived tokens, central identity, fits cloud IAM</td><td>The built-in unsecured JWT handler is for development only; production needs OIDC validation configured against your IdP</td></tr>
+    </tbody>
+  </table></div>
+  <p>In KRaft the inter-broker SCRAM user has a chicken-and-egg problem — brokers need the credential to talk to each other before metadata is available — which is solved by adding SCRAM credentials at <code>kafka-storage format</code> time.</p>
+  <p>One detail that matters for rotation: authentication happens <strong>at connection time</strong>. A connection that authenticated with a password you have since changed, or a token that has since expired, stays authenticated unless <code>connections.max.reauth.ms</code> is set — it is 0, disabled, by default. Revoking a credential without it does not disconnect anyone.</p>
+
+  <h2>Authorization: what may you do?</h2>
+  <p>Enabled by setting an authorizer. In KRaft that is <code>org.apache.kafka.metadata.authorizer.StandardAuthorizer</code>, which stores ACLs in the metadata log — the same log from M4 — so ACL changes replicate to every broker the way topic changes do.</p>
+  <p>An ACL is: <em>principal</em> is <em>allowed / denied</em> <em>operation</em> on <em>resource</em> from <em>host</em>. Resource types are <code>Topic</code>, <code>Group</code>, <code>Cluster</code>, <code>TransactionalId</code>, <code>DelegationToken</code> and <code>User</code>; patterns are <code>LITERAL</code> (including the <code>*</code> wildcard) or <code>PREFIXED</code>.</p>
+  <ul>
+    <li><strong>Deny beats allow.</strong> Any matching deny wins over any number of allows, regardless of how specific either is.</li>
+    <li><strong>No match means deny</strong> — unless <code>allow.everyone.if.no.acl.found=true</code>, which turns a resource with no ACLs into an open one. It exists for migration; left on, every new topic is public until someone remembers to lock it.</li>
+    <li><strong><code>super.users</code></strong> bypass ACLs entirely. The broker and controller principals must be in it, or must have explicit <code>ClusterAction</code> grants — otherwise turning on the authorizer denies the cluster to itself.</li>
+    <li><code>Read</code>, <code>Write</code>, <code>Delete</code> and <code>Alter</code> imply <code>Describe</code>; <code>AlterConfigs</code> implies <code>DescribeConfigs</code>.</li>
+  </ul>
+
+  <h3>What each client actually needs</h3>
+  <div class="scroll"><table>
+    <thead><tr><th>Client</th><th>ACLs</th></tr></thead>
+    <tbody>
+      <tr><td>Producer</td><td><code>Write</code> on the topic. Older brokers also wanted <code>IdempotentWrite</code> on <code>Cluster</code> for an idempotent producer; current ones accept topic <code>Write</code> as sufficient — worth knowing when an upgrade suddenly needs one fewer grant, or a downgrade one more</td></tr>
+      <tr><td>Consumer in a group</td><td><code>Read</code> on the topic <strong>and</strong> <code>Read</code> on the group. Missing the second gives <code>GroupAuthorizationException</code> while the topic grant looks correct</td></tr>
+      <tr><td>Transactional producer</td><td><code>Write</code> on the <code>TransactionalId</code>, <code>Write</code> on output topics, and <code>Read</code> on the consumer group if it calls <code>sendOffsetsToTransaction</code></td></tr>
+      <tr><td>Topic auto-creation / admin</td><td><code>Create</code> on the topic or <code>Cluster</code>; <code>Alter</code> / <code>AlterConfigs</code> for changes</td></tr>
+    </tbody>
+  </table></div>
+<pre>kafka-acls.sh --bootstrap-server ... --add \
+  --allow-principal User:orders-svc \
+  --operation Write --topic orders. --resource-pattern-type prefixed
+kafka-acls.sh ... --add --allow-principal User:billing \
+  --operation Read --topic orders. --resource-pattern-type prefixed \
+  --group billing- --resource-pattern-type prefixed   <span class="c">// topic and group both</span></pre>
+  <p>Prefixed ACLs are what make ACLs manageable at all: grant per team or per tenant prefix once, rather than per topic forever. They only work if topic naming is enforced — which is a governance decision, not a Kafka feature.</p>
+
+  <h2>Multi-tenancy: sharing a cluster without sharing the blast radius</h2>
+  <p>Kafka has no tenant object. Multi-tenancy is assembled from three things: <strong>naming</strong> (a tenant prefix on topics, groups and transactional ids), <strong>ACLs</strong> (prefixed grants per tenant principal), and <strong>quotas</strong>.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Quota</th><th>Limits</th></tr></thead>
+    <tbody>
+      <tr><td><code>producer_byte_rate</code></td><td>Bytes/s produced, per broker</td></tr>
+      <tr><td><code>consumer_byte_rate</code></td><td>Bytes/s fetched, per broker</td></tr>
+      <tr><td><code>request_percentage</code></td><td>Share of network and I/O thread time — catches the client that sends tiny requests very fast, which byte rates never see</td></tr>
+      <tr><td><code>controller_mutation_rate</code></td><td>Rate of partition creations and deletions — the tenant who scripts topic creation in a loop</td></tr>
+    </tbody>
+  </table></div>
+  <p>Quotas are enforced by <strong>throttling, not rejection</strong>: the broker computes how long the client must wait to fall back under its rate, delays the response and reports <code>throttle_time_ms</code>. To the tenant it looks like latency, which is why throttle-time metrics have to be visible to them.</p>
+  <div class="callout warn">
+    <span class="tag">client.id is not an identity</span>
+    <p>Quotas can be set on <code>user</code>, <code>client-id</code> or the pair, most specific match wins. But <code>client.id</code> is a string the client chooses. A quota on client-id alone is a politeness convention: any tenant can dodge it by changing a config value. Enforceable isolation needs an authenticated principal, so quotas belong on <code>user</code>, with client-id as a sub-division within it.</p>
+  </div>
+  <p>What quotas do not isolate: disk and page cache. One tenant's lagging consumer reads cold segments from disk and evicts everyone's hot data from page cache (M2), and a tenant with long retention fills shared disks. Shared clusters work when tenants are cooperative and observable; for regulatory isolation, very different SLOs, or a tenant whose traffic dwarfs the rest, a <strong>separate cluster</strong> is the honest answer. Clusters are cheap compared to the meeting about who broke the shared one.</p>
+
+  <h2>What Kafka does not encrypt</h2>
+  <p>Kafka has <strong>no encryption at rest</strong>. Segments on disk are plaintext; anyone with the volume has the data. The options sit outside Kafka: disk or volume encryption (protects against a stolen disk, not a compromised broker), object-store encryption for tiered storage, or <strong>end-to-end encryption</strong> in the client, where brokers only ever see ciphertext. The last is the strongest and the most invasive: key management becomes yours, and compaction compares key bytes, so a compacted topic needs keys encrypted deterministically or left in the clear — otherwise every record looks unique and compaction never removes anything.</p>
+
+  <h2>Rotation, which is where the outages are</h2>
+  <ul>
+    <li><strong>Certificates:</strong> keystores and truststores can be updated on a running broker through dynamic per-listener config, so rotation does not require a rolling restart. Roll the truststore to trust both old and new CA first, then rotate leaf certificates, then remove the old CA — in that order, or something stops trusting something.</li>
+    <li><strong>SCRAM passwords:</strong> one credential per user per mechanism, so changing it is a cut-over. Rotate by introducing a new principal, moving clients, then deleting the old one — and set <code>connections.max.reauth.ms</code> so the old one actually stops working.</li>
+    <li><strong>OAuth:</strong> short token lifetimes do the rotation for you, provided re-authentication is on; otherwise a token that expired an hour ago keeps a connection alive indefinitely.</li>
+  </ul>
+
+  <div class="callout">
+    <span class="tag">Answering "how would you secure a Kafka cluster?"</span>
+    <p>Separate listeners for inter-broker, controller and client traffic, all over TLS, with advertised addresses that are actually reachable by the clients that use them. Authentication via mTLS or SASL — SCRAM where there is no identity provider, OAUTHBEARER where there is one — so every connection has a real principal. The KRaft <code>StandardAuthorizer</code> with <code>allow.everyone.if.no.acl.found=false</code>, prefixed ACLs per team on an enforced naming scheme, and broker principals in <code>super.users</code>. Quotas on authenticated users, not client ids. Re-authentication enabled so revocation means something. And an explicit statement that Kafka does not encrypt at rest, so that is disk encryption or end-to-end encryption by design — with the TLS CPU cost, from losing zero-copy, planned for before the rollout.</p>
+  </div>
+
+    <h2 id="q-m11">Interview questions — module 11</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m11-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Name Kafka's four security protocols and say which one production normally uses.</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What is the difference between authentication and authorization in Kafka?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What ACLs does a consumer in a consumer group need?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Compare PLAIN, SCRAM, GSSAPI and OAUTHBEARER. When would you pick each?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>How are ACLs evaluated? Cover deny precedence, prefixed patterns, allow.everyone.if.no.acl.found and super.users.</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>How do quotas work, and why should they be set on users rather than client ids?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>After enabling TLS on a fetch-heavy cluster, broker CPU roughly doubles and consumer latency rises. Nothing is misconfigured. Explain why, and what you would do.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Clients in the cluster's own network work. Clients outside it connect to the bootstrap server, then time out on every produce. Diagnose it.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design a shared Kafka platform for twenty internal teams. How do you isolate them, and when would you give a team its own cluster?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>You need to turn on authentication and ACLs on a live, previously open cluster without an outage. How do you sequence it?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m11-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 12</p>
+  <h1>System design with Kafka</h1>
+  <p class="lede">Where every earlier module gets spent at once. A Kafka design interview is not a test of whether you know the API; it is a test of whether you make the five or six decisions that actually matter, in an order that lets each one constrain the next, and say out loud what each one costs.</p>
+
+  <h2 id="m12">A framework you can run every time</h2>
+  <p>The failure mode in a design round is starting with boxes and arrows. Start with the questions whose answers decide the boxes. Run these in order — each one narrows the next.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Decide</th><th>The question that decides it</th><th>Draws on</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td><strong>Requirements</strong></td><td>Throughput (avg and peak), message size, latency budget, retention, how bad is a loss, how bad is a duplicate</td><td>M0</td></tr>
+      <tr><td class="num">2</td><td><strong>Key &amp; ordering</strong></td><td>What must be ordered relative to what? That entity is the key. Everything else is free to reorder</td><td>M1, M5</td></tr>
+      <tr><td class="num">3</td><td><strong>Topics &amp; partitions</strong></td><td>One topic per event type or per entity stream? Partition count from peak throughput, consumer parallelism and headroom — it is hard to change later</td><td>M1, M10</td></tr>
+      <tr><td class="num">4</td><td><strong>Delivery semantics</strong></td><td>At-least-once plus idempotent consumers, or transactions — and where is the boundary with external systems?</td><td>M3, M5, M7</td></tr>
+      <tr><td class="num">5</td><td><strong>Schemas</strong></td><td>Who owns the contract, which compatibility mode, how does a breaking change ship?</td><td>M8</td></tr>
+      <tr><td class="num">6</td><td><strong>Failure modes</strong></td><td>Poison message, slow consumer, broker loss, rebalance storm, region loss — what happens to each, and what does the user see?</td><td>M3, M6, M10</td></tr>
+      <tr><td class="num">7</td><td><strong>Operations</strong></td><td>What is monitored, what alerts, who can write to which topic, how is it replayed?</td><td>M10, M11</td></tr>
+    </tbody>
+  </table></div>
+  <p>Step 2 is the one that separates answers. The key determines ordering, parallelism, hot-partition risk and what a consumer can keep in local state. Choose it from the <em>ordering requirement</em>, not from whatever ID is lying around — and say what is <em>not</em> ordered as a result.</p>
+
+  <div class="callout">
+    <span class="tag">The duplicate question</span>
+    <p>Ask "what happens if this event is processed twice?" for every consumer you draw. If the answer is "nothing, the write is an upsert", you have at-least-once and you are done. If the answer is "the customer is charged twice", you now know where the idempotency key goes — and that is a more useful thing to say than "we use exactly-once".</p>
+  </div>
+
+  <h2>What an event is for: three patterns that get confused</h2>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Payload</th><th>Consumer does</th><th>Coupling</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Event notification</strong></td><td>"Order 42 changed" + ID</td><td>Calls back to the source for details</td><td>Runtime coupling: the source must be up and must scale with every consumer's lookups</td></tr>
+      <tr><td><strong>Event-carried state transfer</strong></td><td>The full new state of order 42</td><td>Keeps its own copy, never calls back</td><td>Schema coupling only; consumers survive the source being down</td></tr>
+      <tr><td><strong>Event sourcing</strong></td><td>Every state change, as the system of record</td><td>Rebuilds state by replaying events</td><td>The log <em>is</em> the database</td></tr>
+    </tbody>
+  </table></div>
+  <p>Event-carried state transfer on a <strong>compacted topic keyed by entity</strong> is the pattern Kafka is best at: the topic is a changelog, the latest value per key is a table, and any new consumer can bootstrap the full current state by reading from the beginning (M2). It is how Kafka Streams' KTables and changelog topics work (M9).</p>
+
+  <h3>Why Kafka is a poor event store</h3>
+  <p>Event sourcing needs to load <em>one aggregate's</em> history to handle a command. Kafka can only read a partition sequentially from an offset — there is no "give me every event for order 42". With order 42 sharing a partition with a million other orders, rebuilding it means scanning them all, or keeping a materialised view that is itself the real store. Nor can it do optimistic concurrency ("append only if the aggregate is still at version 7"). The workable shape is: an event store (or a database with an events table) as the system of record, and Kafka as the <strong>distribution</strong> log that publishes those events — usually via outbox or CDC. Kafka as a projection feed, not as the aggregate store.</p>
+
+  <h3>CQRS read models</h3>
+  <p>The write side publishes events; each read model is a consumer that projects them into whatever shape its queries need — search index, cache, analytics table. Read models are disposable: reset the group's offset and replay to rebuild one, or build a new one alongside the old and switch over. The price is <strong>eventual consistency</strong>, and a read-your-own-writes requirement has to be handled explicitly — return the new state from the write path, or have the client wait on a version — rather than discovered in production.</p>
+
+  <h2>Getting events in: outbox and CDC</h2>
+  <p>Any service that changes its database and must announce it has the dual-write problem from M7. The answer is the same: write the event to an <code>outbox</code> table in the same database transaction, and let CDC (Debezium reading the write-ahead log, M9) publish it. One transaction, one system; the publish is a retriable at-least-once delivery of something already committed. Plain CDC on business tables is the cheaper variant but publishes your schema as a contract — the outbox lets you publish an event designed for consumers instead of an internal row.</p>
+
+  <h2>Sagas: business transactions across services</h2>
+  <p>There is no distributed transaction across services, so a multi-step business process is a sequence of local transactions, each with a <strong>compensating action</strong> that semantically undoes it (refund, release the reservation, cancel the shipment). Compensations are not rollbacks — the intermediate state was visible, and a compensation can itself fail and must be retried until it succeeds.</p>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Choreography</th><th>Orchestration</th></tr></thead>
+    <tbody>
+      <tr><td>How</td><td>Each service reacts to the previous service's events</td><td>A coordinator sends commands and tracks state per saga instance</td></tr>
+      <tr><td>Good at</td><td>Two or three steps, loosely owned, no central team</td><td>Many steps, branching, timeouts, a process someone has to be able to explain</td></tr>
+      <tr><td>Fails as</td><td>No one place shows where order 42 is stuck; cycles appear as services are added</td><td>The orchestrator becomes a god service if it accumulates business logic</td></tr>
+    </tbody>
+  </table></div>
+  <p>Rule of thumb: once a process needs <strong>timeouts</strong> ("cancel if payment has not arrived in 15 minutes"), it wants an orchestrator — a durable workflow engine or a state machine keyed by saga ID — because timeouts in pure choreography have nowhere to live.</p>
+
+  <h2>Retries, DLQs, and what they do to ordering</h2>
+  <p>A message that fails processing has three possible fates, and each costs something different:</p>
+  <ul>
+    <li><strong>Blocking retry</strong> — retry in place with backoff. Preserves ordering. Stalls the whole partition behind one bad message, and long backoffs risk <code>max.poll.interval.ms</code> (M6) — so pause the partition rather than sleeping in the poll loop.</li>
+    <li><strong>Non-blocking retry topics</strong> — publish the failure to <code>orders.retry.1m</code>, <code>orders.retry.10m</code>, then a DLQ, and commit. The main partition keeps flowing. <strong>Ordering for that key is now broken</strong>: the next event for order 42 is processed before the retried one.</li>
+    <li><strong>Dead-letter topic</strong> — park it with headers recording the error, source topic, partition and offset, for inspection and replay. A DLQ nobody alerts on or replays from is just a slower way to lose data.</li>
+  </ul>
+  <div class="callout warn">
+    <span class="tag">The trap</span>
+    <p>Non-blocking retry and per-key ordering are incompatible unless you add machinery. If order matters, either retry blocking, or — when a key has a message in retry — route every later message for that key to the retry path too, which needs a store of "keys currently in retry". Also separate <strong>transient</strong> failures (timeout, 503: retry) from <strong>permanent</strong> ones (deserialization error, validation failure: straight to the DLQ). Retrying a poison message ten times only delays the DLQ.</p>
+  </div>
+
+  <h2>Idempotent consumers</h2>
+  <p>At-least-once is the default, so every consumer with side effects must tolerate redelivery. In order of preference:</p>
+  <ol>
+    <li><strong>Naturally idempotent writes</strong> — upsert on a business key, <code>SET status = 'shipped'</code> rather than <code>count = count + 1</code>.</li>
+    <li><strong>Version or sequence guard</strong> — apply only if the event's version is newer than the stored one. Also defends against reordering.</li>
+    <li><strong>Processed-ID table</strong> — store the event ID (or <code>topic-partition-offset</code>) in the same database transaction as the effect, with a unique constraint.</li>
+    <li><strong>Downstream idempotency key</strong> — for an external API that supports one (payment providers do), derive the key from the event, never generate it at send time.</li>
+  </ol>
+
+  <h2>Request-reply over Kafka, and why it is usually a smell</h2>
+  <p>It can be done: a reply topic, a correlation ID header, a pending-requests map waiting on a future. But the caller is now synchronous on an asynchronous system — latency includes producer batching, consumer polling and possibly a rebalance; replies must be routed back to the one instance holding the future; and timeouts leave orphaned work. If the caller needs an answer now, use RPC. Kafka earns its place when the caller does <em>not</em> need to wait: return <code>202 Accepted</code> with an ID and let the result arrive as an event or a status query.</p>
+
+  <h2>Multi-region</h2>
+  <ul>
+    <li><strong>Stretch cluster</strong> across nearby zones/regions — synchronous replication, RPO zero, but every <code>acks=all</code> write pays the inter-region round trip and the controller quorum (M4) needs a majority to survive a region loss, which wants three locations.</li>
+    <li><strong>Active-passive</strong> with MirrorMaker 2 (M10) — asynchronous, so RPO is the replication lag, and offsets differ between clusters; MM2's checkpointing translates consumer group offsets for failover. Rehearse failover; an untested DR plan is a hope.</li>
+    <li><strong>Active-active</strong> — each region writes locally and mirrors the other's topics under a prefix. Fine for append-only, commutative data (clickstream). For data with a single owner per entity, pin each key's writes to a home region, or accept conflict resolution you have designed rather than discovered.</li>
+  </ul>
+
+  <h2>Worked designs</h2>
+
+  <h3>1 · Order processing</h3>
+  <ul>
+    <li><strong>Key:</strong> <code>orderId</code>. Ordering matters per order (created → paid → shipped); nothing needs ordering across orders. Not <code>customerId</code>: a large B2B customer becomes a hot partition.</li>
+    <li><strong>Topics:</strong> <code>orders.events</code> (event-carried state, via outbox from the order service), <code>payments.events</code>, <code>shipments.events</code>. Partitions sized for peak (Black Friday, not Tuesday) with headroom — say 48 or 64 — because adding partitions later moves keys (M1).</li>
+    <li><strong>Semantics:</strong> at-least-once everywhere, idempotent consumers keyed on <code>orderId</code> + version; payment calls carry an idempotency key derived from the event.</li>
+    <li><strong>Saga:</strong> orchestrated — reserve stock, take payment, ship — with compensations and a payment timeout.</li>
+    <li><strong>Failure modes:</strong> poison event → DLQ with alerting; payment provider outage → blocking retry with paused partitions rather than retry topics, since order state must not be applied out of sequence.</li>
+  </ul>
+
+  <h3>2 · Clickstream / activity analytics</h3>
+  <ul>
+    <li><strong>Requirements flip:</strong> very high volume, small events, duplicates tolerable (aggregates), a little loss arguably tolerable, latency in seconds.</li>
+    <li><strong>Key:</strong> <code>sessionId</code> or <code>userId</code> if sessionisation needs per-user order; otherwise null key and the sticky partitioner (M5) for even spread. Beware bots: one user ID at a thousand events per second is a hot partition.</li>
+    <li><strong>Producer:</strong> high <code>linger.ms</code>, compression (zstd or lz4), large batches — this is a throughput system.</li>
+    <li><strong>Downstream:</strong> Kafka Streams or Flink for windowed aggregates; a sink connector to the warehouse or object storage. Retention short on the raw topic; tiered storage (M2) if replay windows must be long.</li>
+    <li><strong>Semantics:</strong> at-least-once; dedupe on an event ID within a window if counts must be exact.</li>
+  </ul>
+
+  <h3>3 · Payment ledger</h3>
+  <ul>
+    <li><strong>The decision that matters:</strong> the ledger's system of record is a database with double-entry constraints, not Kafka. Kafka distributes ledger entries via outbox; it does not hold the balance.</li>
+    <li><strong>Key:</strong> <code>accountId</code>, so entries for one account apply in order and a balance projection can live in local state.</li>
+    <li><strong>Durability:</strong> RF=3, <code>min.insync.replicas=2</code>, <code>acks=all</code>, unclean leader election off (M3). Retention long or infinite; this topic is audit evidence.</li>
+    <li><strong>Semantics:</strong> transactions for Kafka-to-Kafka projections (balances, fraud features); every external effect behind an idempotency key. Schema compatibility <code>FULL_TRANSITIVE</code> (M8), because old entries are replayed forever.</li>
+    <li><strong>Access:</strong> prefixed ACLs so only the ledger service principal can write (M11).</li>
+  </ul>
+
+  <h2>When the right design has no Kafka in it</h2>
+  <p>Back to M0, now with reasons. Do not reach for Kafka for: a work queue where each task is independent and you want per-message ack, retry and delay (a queue — or Share Groups — fit better); synchronous request-reply; a few hundred events a day between two services (a table and a poller); per-entity lookups of history (a database); or a team with no one to operate it and no managed offering. Saying "I would not use Kafka here, because…" is a strong answer when it is true.</p>
+
+  <div class="callout">
+    <span class="tag">Answering "design an order processing system on Kafka"</span>
+    <p>Start from requirements — peak throughput, latency, and what a duplicate or a loss costs. Key by <code>orderId</code>, because ordering is needed per order and nowhere else, and say that cross-order ordering is deliberately given up. Size partitions for peak with headroom, since changing the count remaps keys. The order service publishes event-carried state via an outbox and CDC, so there is no dual write. Consumers are at-least-once and idempotent on order ID and version, external calls carry idempotency keys, and the multi-step flow is an orchestrated saga with compensations and timeouts. Poison messages go to an alerted DLQ; transient failures retry blocking so per-order state is never applied out of order. Schemas are registered with a compatibility mode, topics are RF=3 with <code>min.insync.replicas=2</code>, and lag per group is the first alert. Then name what the design does not do — no global ordering, eventual consistency in read models — because a design without its trade-offs stated is not finished.</p>
+  </div>
+
+    <h2 id="q-m12">Interview questions — module 12</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m12-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>How do you choose the message key for a topic?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What is the difference between event notification and event-carried state transfer?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is a dead-letter topic and what should go into it?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Why does non-blocking retry with retry topics break ordering, and what are the alternatives?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>How do you make a consumer idempotent?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Choreography or orchestration for a saga — how do you choose?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A team proposes using Kafka as the event store for an event-sourced system. Evaluate it.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design a payment ledger that uses Kafka. What does Kafka do and what does it not do?</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A service needs a synchronous answer from another service, and the team wants to do request-reply over Kafka. What do you say?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design multi-region for a Kafka-based order platform. What do you have to decide?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m12-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 13</p>
+  <h1>Mock interview &amp; incident scenarios</h1>
+  <p class="lede">The capstone, and the only module with no new mechanism in it. Everything here has already been covered; the work is saying it out loud, under time, to someone who keeps asking "and then what?"</p>
+
+  <h2 id="m13">Running a mock interview with this material</h2>
+  <p>Reading the notes again is not preparation. Retrieval under pressure is a different skill from recognition, and the only way to practise it is to produce answers cold, then compare.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Block</th><th>Time</th><th>What happens</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Rapid-fire</strong></td><td>10 min</td><td>The table below, one line per answer. Anything that takes more than a sentence is a gap, not a pass.</td></tr>
+      <tr><td><strong>Deep question</strong></td><td>15 min</td><td>One Senior question from the retry list, answered out loud, then followed by at least three "why?" or "what breaks?" probes.</td></tr>
+      <tr><td><strong>Incident scenario</strong></td><td>15 min</td><td>One scenario below. The interviewer gives only the symptom; everything else must be asked for.</td></tr>
+      <tr><td><strong>Grade</strong></td><td>10 min</td><td>Against the rubric, from the recording, not from memory.</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>Record yourself.</strong> Audio is enough. What you think you said and what you said differ, and the difference is mostly hedging, unfinished sentences, and the mechanism you skipped because it felt obvious. Grade from the transcript. If you have a partner, have them play interviewer with the model answer open and only the right to ask "why".</p>
+
+  <h3>The senior rubric, made concrete</h3>
+  <p>Same question for all three: <em>"Can a Kafka write with <code>acks=all</code> be lost?"</em></p>
+  <div class="scroll"><table>
+    <thead><tr><th>Grade</th><th>Sounds like</th><th>What gives it away</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Missing the point</strong></td><td>"No — <code>acks=all</code> means every replica has it, so it's durable."</td><td>Wrong model of the mechanism. <code>acks=all</code> means every <em>in-sync</em> replica, and the ISR can be one broker.</td></tr>
+      <tr><td><strong>Correct but shallow</strong></td><td>"Yes, if the ISR shrinks to the leader alone. Set <code>min.insync.replicas=2</code>."</td><td>Right answer, recited. No failure sequence, no cost, nothing about what <code>min.insync.replicas</code> does to availability.</td></tr>
+      <tr><td><strong>Senior level</strong></td><td>Walks the sequence: followers fall out of the ISR, leader accepts with ISR=1, leader dies, a lagging replica is elected — only with unclean election enabled, which is off by default. Then <code>min.insync.replicas=2</code> with RF=3: writes fail with <code>NotEnoughReplicas</code> instead of being lost, so you have traded availability for durability on purpose. Then names what is still not covered: the page cache is not fsynced, so a correlated power loss across all ISR members can still lose acknowledged data.</td><td>Mechanism, failure sequence, the knob, what the knob costs, and the edge it still does not cover — unprompted.</td></tr>
+    </tbody>
+  </table></div>
+  <p>The pattern generalises: a senior answer is the correct answer plus <em>the trade-off it makes</em> plus <em>the boundary where it stops holding</em>. Most "correct but shallow" grades are missing one of those two, not the core fact.</p>
+
+  <h2>Rapid-fire round</h2>
+  <p>One line each. Cover the right column, answer, check.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Question</th><th>One-line answer</th><th>Module</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>Does consuming a message delete it?</td><td>No — retention deletes; consumers only move an offset.</td><td>M0</td></tr>
+      <tr><td class="num">2</td><td>What does a Share Group give up?</td><td>Per-partition ordering, in exchange for per-record acknowledgement and more consumers than partitions.</td><td>M0</td></tr>
+      <tr><td class="num">3</td><td>Unit of ordering?</td><td>The partition. Nothing across partitions.</td><td>M1</td></tr>
+      <tr><td class="num">4</td><td>Max active consumers in a group?</td><td>One per partition; extras sit idle.</td><td>M1</td></tr>
+      <tr><td class="num">5</td><td>Why does adding partitions break keyed ordering?</td><td>Key-to-partition is hash mod partition count, so existing keys move.</td><td>M1</td></tr>
+      <tr><td class="num">6</td><td>What gets deleted by retention?</td><td>Whole closed segments, never the active one.</td><td>M2</td></tr>
+      <tr><td class="num">7</td><td>Why is Kafka fast on disks?</td><td>Sequential appends, the OS page cache, and zero-copy <code>sendfile</code> to the socket.</td><td>M2</td></tr>
+      <tr><td class="num">8</td><td>What does compaction keep?</td><td>At least the latest value per key; tombstones survive for <code>delete.retention.ms</code>.</td><td>M2</td></tr>
+      <tr><td class="num">9</td><td>High watermark?</td><td>Highest offset replicated to all ISR members; consumers read up to it.</td><td>M3</td></tr>
+      <tr><td class="num">10</td><td>What removes a follower from the ISR?</td><td>Not caught up within <code>replica.lag.time.max.ms</code>.</td><td>M3</td></tr>
+      <tr><td class="num">11</td><td>Cost of unclean leader election?</td><td>Availability bought with silently lost acknowledged writes.</td><td>M3</td></tr>
+      <tr><td class="num">12</td><td>Where does cluster metadata live in KRaft?</td><td>The <code>__cluster_metadata</code> log, replicated by a Raft quorum of controllers.</td><td>M4</td></tr>
+      <tr><td class="num">13</td><td>How many controllers, and why odd?</td><td>Usually 3 or 5; a majority must survive, so an even count adds cost without tolerating more failures.</td><td>M4</td></tr>
+      <tr><td class="num">14</td><td>Does <code>linger.ms=0</code> disable batching?</td><td>No — records accumulate while a request is in flight.</td><td>M5</td></tr>
+      <tr><td class="num">15</td><td>Why can <code>send()</code> block?</td><td><code>buffer.memory</code> is full; it waits up to <code>max.block.ms</code>.</td><td>M5</td></tr>
+      <tr><td class="num">16</td><td>What bounds total retry time?</td><td><code>delivery.timeout.ms</code>, not <code>retries</code>.</td><td>M5</td></tr>
+      <tr><td class="num">17</td><td>What does idempotence not survive?</td><td>A producer restart — new PID, new sequence space.</td><td>M5</td></tr>
+      <tr><td class="num">18</td><td>Alive but stuck consumer — which timeout fires?</td><td><code>max.poll.interval.ms</code>; heartbeats keep the session alive.</td><td>M6</td></tr>
+      <tr><td class="num">19</td><td>Real lever for a rebalance storm?</td><td><code>max.poll.records</code> — shorten each poll cycle.</td><td>M6</td></tr>
+      <tr><td class="num">20</td><td>What does static membership buy?</td><td>A restart within the session timeout causes no rebalance.</td><td>M6</td></tr>
+      <tr><td class="num">21</td><td>What blocks a <code>read_committed</code> consumer?</td><td>An open transaction, at the Last Stable Offset.</td><td>M7</td></tr>
+      <tr><td class="num">22</td><td>Exactly-once into Postgres?</td><td>No — at-least-once plus idempotency at the boundary.</td><td>M7</td></tr>
+      <tr><td class="num">23</td><td>Safest default compatibility mode, and why?</td><td><code>BACKWARD_TRANSITIVE</code> — new readers handle every old version still on disk, so consumers upgrade first; plain <code>BACKWARD</code> only checks the latest.</td><td>M8</td></tr>
+      <tr><td class="num">24</td><td>Where does a Streams state store live durably?</td><td>Its changelog topic; local RocksDB is a cache rebuilt from it.</td><td>M9</td></tr>
+      <tr><td class="num">25</td><td>First metric for consumer health?</td><td>Lag — measured in time, not just messages.</td><td>M10</td></tr>
+      <tr><td class="num">26</td><td>Authentication vs authorization in Kafka?</td><td>SASL/mTLS establishes the principal; ACLs decide what it may do.</td><td>M11</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Incident scenarios</h2>
+  <p>Posed the way an interviewer poses them: a symptom and nothing else. The grade is mostly in the questions you ask before you propose anything.</p>
+
+  <h3>1 · "Consumer lag on one partition keeps climbing; the others are fine."</h3>
+  <ul>
+    <li><strong>Ask:</strong> is it always the same partition? Is the topic keyed, and by what? Is the consumer for that partition slow, or is it receiving more?</li>
+    <li><strong>Likely causes:</strong> a hot key routing a disproportionate share to one partition; one poison or very slow record being retried; the consumer owning it co-located with something noisy.</li>
+    <li><strong>Fix:</strong> per-partition produce rate tells you which. Hot key → re-key with a salt, accepting the loss of per-key ordering, or isolate the key. Adding partitions does not help — the hot key still hashes to one. <em>Draws on M1, M6, M10.</em></li>
+  </ul>
+
+  <h3>2 · "Every few minutes the whole consumer group rebalances, and lag never recovers."</h3>
+  <ul>
+    <li><strong>Ask:</strong> what do the logs say leaves the group — session timeout or poll interval? How long does processing one <code>poll()</code> batch take? Did a deploy or a downstream dependency change?</li>
+    <li><strong>Likely causes:</strong> processing per batch exceeds <code>max.poll.interval.ms</code>, the member is evicted, its partitions are reprocessed, load rises, the next member is evicted — a self-sustaining loop.</li>
+    <li><strong>Fix:</strong> lower <code>max.poll.records</code> first; raise the interval only knowingly, since it trades a loud failure for a slow one. Cooperative or KIP-848 rebalancing limits the blast radius; static membership stops restarts from triggering it. <em>Draws on M6.</em></li>
+  </ul>
+
+  <h3>3 · "Producers see latency spikes of several seconds, but brokers look healthy."</h3>
+  <ul>
+    <li><strong>Ask:</strong> is the time in <code>send()</code> itself or in the callback? What are <code>buffer.memory</code> and <code>max.block.ms</code>? Any under-replicated partitions or ISR churn at the same moments?</li>
+    <li><strong>Likely causes:</strong> buffer exhaustion making <code>send()</code> block; <code>acks=all</code> waiting on a slow follower that has not yet dropped out of the ISR; request queueing on one overloaded broker.</li>
+    <li><strong>Fix:</strong> measure blocked time in <code>send()</code> separately; find the slow follower via replica fetch lag; rebalance leadership if one broker leads too much. <em>Draws on M3, M5, M10.</em></li>
+  </ul>
+
+  <h3>4 · "After a deploy, the order service is processing some orders twice."</h3>
+  <ul>
+    <li><strong>Ask:</strong> twice within Kafka, or twice into the database? Auto-commit or manual? Are transactions in use, and how is <code>transactional.id</code> derived? Did the deploy coincide with a rebalance?</li>
+    <li><strong>Likely causes:</strong> commit-after-process reprocessing on rebalance — at-least-once doing exactly what it promises; a hostname-derived <code>transactional.id</code> so the old and new pod never fence each other; a non-idempotent database sink.</li>
+    <li><strong>Fix:</strong> the duplicate is expected; the bug is a sink that cannot absorb it. Idempotency key from <code>(topic, partition, offset)</code> or a business key with a unique constraint. <em>Draws on M6, M7.</em></li>
+  </ul>
+
+  <h3>5 · "A new producer version shipped and two downstream consumers started failing to deserialize."</h3>
+  <ul>
+    <li><strong>Ask:</strong> is there a schema registry, and what compatibility mode is the subject in? Was the field removed, renamed, or had its type changed? Which side was deployed first?</li>
+    <li><strong>Likely causes:</strong> compatibility set to <code>NONE</code>, or a change the mode permits but deploy order did not respect; a consumer using a generated class that cannot read the new shape.</li>
+    <li><strong>Fix:</strong> roll the producer back — records already written stay on the log, so consumers must be fixed to read them regardless. Enforce compatibility in CI, not at runtime. <em>Draws on M8.</em></li>
+  </ul>
+
+  <h2>The cold-retry list</h2>
+  <p>Questions answered from the model rather than attempted, or not yet graded. Retry each cold — no notes, out loud, recorded — then grade. A tick in the quiz counts only after that.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Module</th><th>Questions</th><th>Why on the list</th></tr></thead>
+    <tbody>
+      <tr><td>M0</td><td>Q9 (delayed delivery on Kafka), Q10 (RabbitMQ and Kafka side by side)</td><td>Q9 graded, Q10 answered from the model</td></tr>
+      <tr><td>M2</td><td>Q9 (compacted topic feeding a cache), Q10 (case for tiered storage)</td><td>Answered from the model</td></tr>
+      <tr><td>M3</td><td>All ten</td><td>Answered from the model</td></tr>
+      <tr><td>M4</td><td>All ten</td><td>Answered from the model</td></tr>
+      <tr><td>M5</td><td>All ten</td><td>Answered from the model</td></tr>
+      <tr><td>M6</td><td>All ten</td><td>Lab run, questions not yet graded</td></tr>
+      <tr><td>M7</td><td>All ten</td><td>Not yet graded</td></tr>
+    </tbody>
+  </table></div>
+  <p>That is the 34 queued in the README plus twenty more from M6 and M7. Start with the Senior tier of M3 and M7: replication and transactions are where follow-up probes go deepest.</p>
+
+  <h2>Senior-answer anti-patterns</h2>
+  <div class="callout warn">
+    <span class="tag">Things that cap an answer at "correct but shallow"</span>
+    <ul>
+      <li><strong>Claiming exactly-once.</strong> Without saying "Kafka-to-Kafka", the next question is how the database participates, and there is no good answer to it.</li>
+      <li><strong>"Just add partitions."</strong> It reshuffles keys and breaks per-key ordering, does nothing for a hot key, adds controller and file-handle cost, and cannot be undone.</li>
+      <li><strong>Ignoring ordering.</strong> Any design that parallelises, retries or re-keys must say what happens to order — and whether anyone actually needed it.</li>
+      <li><strong>Not naming the trade-off.</strong> Every knob in this course buys something with something: durability with availability, throughput with latency, ordering with parallelism. An answer that names only the benefit reads as recited.</li>
+      <li><strong>Defaults from the wrong client.</strong> Java client defaults are what interviewers quote; librdkafka's differ.</li>
+      <li><strong>Solving before asking.</strong> In an incident scenario, a fix proposed before scale, keys, ordering needs and the actual symptom are established is a guess.</li>
+    </ul>
+  </div>
+
+  <div class="callout">
+    <span class="tag">What "senior level" means across this whole course</span>
+    <p>Not knowing more settings. Knowing which mechanism a setting acts on, what it costs, and where it stops working — and saying all three without being asked. The rapid-fire round checks the facts; the scenarios and the follow-ups check whether the facts are connected.</p>
+  </div>
+
+    <h2 id="q-m13">Interview questions — module 13</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m13-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>In two minutes, explain what Kafka is to someone who knows only RabbitMQ.</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>Which settings decide whether an acknowledged write can be lost, and what does each do?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>Why can a consumer group not use more consumers than there are partitions?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Trace one record from producer.send() to a read_committed consumer's poll(), naming every place it can wait.</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>A team asks to increase a topic from 12 to 48 partitions. What do you ask before agreeing?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>What does 'consumer lag' mean, and why is a message count the wrong unit for alerting on it?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design an order pipeline: an order service writes to Postgres, and fulfilment, billing and analytics react. Make it correct under crashes.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A broker's disk fails. Walk through what happens across the cluster, from the controller to the consumers, and what you would check.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>When would you recommend not using Kafka, and what would you use instead?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Name three Kafka guarantees that people commonly overstate, and state each one precisely.</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m13-questions">0 / 10</p>
 
 
   <h2 id="a-m0">Model answers — module 0</h2>

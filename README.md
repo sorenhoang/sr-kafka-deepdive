@@ -52,12 +52,12 @@ M3, M4 and M5.
 | M5 | Producer internals, idempotent producer | ready | ✅ | model |
 | M6 | Consumer internals, rebalance, KIP-848 | ready | ✅ | |
 | M7 | Delivery semantics, transactions, exactly-once | ready | n/a | |
-| M8 | Schema Registry, compatibility, evolution | | | |
-| M9 | Connect, CDC/Debezium, Kafka Streams | | | |
-| M10 | Partition sizing, monitoring, production incidents | | | |
-| M11 | TLS, SASL, ACLs, multi-tenancy | | | |
-| M12 | System design with Kafka | | | |
-| M13 | Mock interview, incident scenarios | | | |
+| M8 | Schema Registry, compatibility, evolution | ready | n/a | |
+| M9 | Connect, CDC/Debezium, Kafka Streams | ready | n/a | |
+| M10 | Partition sizing, monitoring, production incidents | ready | n/a | |
+| M11 | TLS, SASL, ACLs, multi-tenancy | ready | n/a | |
+| M12 | System design with Kafka | ready | n/a | |
+| M13 | Mock interview, incident scenarios | ready | n/a | |
 
 ## Layout
 

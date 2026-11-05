@@ -1,0 +1,136 @@
+  <p class="eyebrow">Module 13</p>
+  <h1>Mock interview &amp; incident scenarios</h1>
+  <p class="lede">The capstone, and the only module with no new mechanism in it. Everything here has already been covered; the work is saying it out loud, under time, to someone who keeps asking "and then what?"</p>
+
+  <h2 id="m13">Running a mock interview with this material</h2>
+  <p>Reading the notes again is not preparation. Retrieval under pressure is a different skill from recognition, and the only way to practise it is to produce answers cold, then compare.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Block</th><th>Time</th><th>What happens</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Rapid-fire</strong></td><td>10 min</td><td>The table below, one line per answer. Anything that takes more than a sentence is a gap, not a pass.</td></tr>
+      <tr><td><strong>Deep question</strong></td><td>15 min</td><td>One Senior question from the retry list, answered out loud, then followed by at least three "why?" or "what breaks?" probes.</td></tr>
+      <tr><td><strong>Incident scenario</strong></td><td>15 min</td><td>One scenario below. The interviewer gives only the symptom; everything else must be asked for.</td></tr>
+      <tr><td><strong>Grade</strong></td><td>10 min</td><td>Against the rubric, from the recording, not from memory.</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>Record yourself.</strong> Audio is enough. What you think you said and what you said differ, and the difference is mostly hedging, unfinished sentences, and the mechanism you skipped because it felt obvious. Grade from the transcript. If you have a partner, have them play interviewer with the model answer open and only the right to ask "why".</p>
+
+  <h3>The senior rubric, made concrete</h3>
+  <p>Same question for all three: <em>"Can a Kafka write with <code>acks=all</code> be lost?"</em></p>
+  <div class="scroll"><table>
+    <thead><tr><th>Grade</th><th>Sounds like</th><th>What gives it away</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Missing the point</strong></td><td>"No — <code>acks=all</code> means every replica has it, so it's durable."</td><td>Wrong model of the mechanism. <code>acks=all</code> means every <em>in-sync</em> replica, and the ISR can be one broker.</td></tr>
+      <tr><td><strong>Correct but shallow</strong></td><td>"Yes, if the ISR shrinks to the leader alone. Set <code>min.insync.replicas=2</code>."</td><td>Right answer, recited. No failure sequence, no cost, nothing about what <code>min.insync.replicas</code> does to availability.</td></tr>
+      <tr><td><strong>Senior level</strong></td><td>Walks the sequence: followers fall out of the ISR, leader accepts with ISR=1, leader dies, a lagging replica is elected — only with unclean election enabled, which is off by default. Then <code>min.insync.replicas=2</code> with RF=3: writes fail with <code>NotEnoughReplicas</code> instead of being lost, so you have traded availability for durability on purpose. Then names what is still not covered: the page cache is not fsynced, so a correlated power loss across all ISR members can still lose acknowledged data.</td><td>Mechanism, failure sequence, the knob, what the knob costs, and the edge it still does not cover — unprompted.</td></tr>
+    </tbody>
+  </table></div>
+  <p>The pattern generalises: a senior answer is the correct answer plus <em>the trade-off it makes</em> plus <em>the boundary where it stops holding</em>. Most "correct but shallow" grades are missing one of those two, not the core fact.</p>
+
+  <h2>Rapid-fire round</h2>
+  <p>One line each. Cover the right column, answer, check.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Question</th><th>One-line answer</th><th>Module</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>Does consuming a message delete it?</td><td>No — retention deletes; consumers only move an offset.</td><td>M0</td></tr>
+      <tr><td class="num">2</td><td>What does a Share Group give up?</td><td>Per-partition ordering, in exchange for per-record acknowledgement and more consumers than partitions.</td><td>M0</td></tr>
+      <tr><td class="num">3</td><td>Unit of ordering?</td><td>The partition. Nothing across partitions.</td><td>M1</td></tr>
+      <tr><td class="num">4</td><td>Max active consumers in a group?</td><td>One per partition; extras sit idle.</td><td>M1</td></tr>
+      <tr><td class="num">5</td><td>Why does adding partitions break keyed ordering?</td><td>Key-to-partition is hash mod partition count, so existing keys move.</td><td>M1</td></tr>
+      <tr><td class="num">6</td><td>What gets deleted by retention?</td><td>Whole closed segments, never the active one.</td><td>M2</td></tr>
+      <tr><td class="num">7</td><td>Why is Kafka fast on disks?</td><td>Sequential appends, the OS page cache, and zero-copy <code>sendfile</code> to the socket.</td><td>M2</td></tr>
+      <tr><td class="num">8</td><td>What does compaction keep?</td><td>At least the latest value per key; tombstones survive for <code>delete.retention.ms</code>.</td><td>M2</td></tr>
+      <tr><td class="num">9</td><td>High watermark?</td><td>Highest offset replicated to all ISR members; consumers read up to it.</td><td>M3</td></tr>
+      <tr><td class="num">10</td><td>What removes a follower from the ISR?</td><td>Not caught up within <code>replica.lag.time.max.ms</code>.</td><td>M3</td></tr>
+      <tr><td class="num">11</td><td>Cost of unclean leader election?</td><td>Availability bought with silently lost acknowledged writes.</td><td>M3</td></tr>
+      <tr><td class="num">12</td><td>Where does cluster metadata live in KRaft?</td><td>The <code>__cluster_metadata</code> log, replicated by a Raft quorum of controllers.</td><td>M4</td></tr>
+      <tr><td class="num">13</td><td>How many controllers, and why odd?</td><td>Usually 3 or 5; a majority must survive, so an even count adds cost without tolerating more failures.</td><td>M4</td></tr>
+      <tr><td class="num">14</td><td>Does <code>linger.ms=0</code> disable batching?</td><td>No — records accumulate while a request is in flight.</td><td>M5</td></tr>
+      <tr><td class="num">15</td><td>Why can <code>send()</code> block?</td><td><code>buffer.memory</code> is full; it waits up to <code>max.block.ms</code>.</td><td>M5</td></tr>
+      <tr><td class="num">16</td><td>What bounds total retry time?</td><td><code>delivery.timeout.ms</code>, not <code>retries</code>.</td><td>M5</td></tr>
+      <tr><td class="num">17</td><td>What does idempotence not survive?</td><td>A producer restart — new PID, new sequence space.</td><td>M5</td></tr>
+      <tr><td class="num">18</td><td>Alive but stuck consumer — which timeout fires?</td><td><code>max.poll.interval.ms</code>; heartbeats keep the session alive.</td><td>M6</td></tr>
+      <tr><td class="num">19</td><td>Real lever for a rebalance storm?</td><td><code>max.poll.records</code> — shorten each poll cycle.</td><td>M6</td></tr>
+      <tr><td class="num">20</td><td>What does static membership buy?</td><td>A restart within the session timeout causes no rebalance.</td><td>M6</td></tr>
+      <tr><td class="num">21</td><td>What blocks a <code>read_committed</code> consumer?</td><td>An open transaction, at the Last Stable Offset.</td><td>M7</td></tr>
+      <tr><td class="num">22</td><td>Exactly-once into Postgres?</td><td>No — at-least-once plus idempotency at the boundary.</td><td>M7</td></tr>
+      <tr><td class="num">23</td><td>Safest default compatibility mode, and why?</td><td><code>BACKWARD_TRANSITIVE</code> — new readers handle every old version still on disk, so consumers upgrade first; plain <code>BACKWARD</code> only checks the latest.</td><td>M8</td></tr>
+      <tr><td class="num">24</td><td>Where does a Streams state store live durably?</td><td>Its changelog topic; local RocksDB is a cache rebuilt from it.</td><td>M9</td></tr>
+      <tr><td class="num">25</td><td>First metric for consumer health?</td><td>Lag — measured in time, not just messages.</td><td>M10</td></tr>
+      <tr><td class="num">26</td><td>Authentication vs authorization in Kafka?</td><td>SASL/mTLS establishes the principal; ACLs decide what it may do.</td><td>M11</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Incident scenarios</h2>
+  <p>Posed the way an interviewer poses them: a symptom and nothing else. The grade is mostly in the questions you ask before you propose anything.</p>
+
+  <h3>1 · "Consumer lag on one partition keeps climbing; the others are fine."</h3>
+  <ul>
+    <li><strong>Ask:</strong> is it always the same partition? Is the topic keyed, and by what? Is the consumer for that partition slow, or is it receiving more?</li>
+    <li><strong>Likely causes:</strong> a hot key routing a disproportionate share to one partition; one poison or very slow record being retried; the consumer owning it co-located with something noisy.</li>
+    <li><strong>Fix:</strong> per-partition produce rate tells you which. Hot key → re-key with a salt, accepting the loss of per-key ordering, or isolate the key. Adding partitions does not help — the hot key still hashes to one. <em>Draws on M1, M6, M10.</em></li>
+  </ul>
+
+  <h3>2 · "Every few minutes the whole consumer group rebalances, and lag never recovers."</h3>
+  <ul>
+    <li><strong>Ask:</strong> what do the logs say leaves the group — session timeout or poll interval? How long does processing one <code>poll()</code> batch take? Did a deploy or a downstream dependency change?</li>
+    <li><strong>Likely causes:</strong> processing per batch exceeds <code>max.poll.interval.ms</code>, the member is evicted, its partitions are reprocessed, load rises, the next member is evicted — a self-sustaining loop.</li>
+    <li><strong>Fix:</strong> lower <code>max.poll.records</code> first; raise the interval only knowingly, since it trades a loud failure for a slow one. Cooperative or KIP-848 rebalancing limits the blast radius; static membership stops restarts from triggering it. <em>Draws on M6.</em></li>
+  </ul>
+
+  <h3>3 · "Producers see latency spikes of several seconds, but brokers look healthy."</h3>
+  <ul>
+    <li><strong>Ask:</strong> is the time in <code>send()</code> itself or in the callback? What are <code>buffer.memory</code> and <code>max.block.ms</code>? Any under-replicated partitions or ISR churn at the same moments?</li>
+    <li><strong>Likely causes:</strong> buffer exhaustion making <code>send()</code> block; <code>acks=all</code> waiting on a slow follower that has not yet dropped out of the ISR; request queueing on one overloaded broker.</li>
+    <li><strong>Fix:</strong> measure blocked time in <code>send()</code> separately; find the slow follower via replica fetch lag; rebalance leadership if one broker leads too much. <em>Draws on M3, M5, M10.</em></li>
+  </ul>
+
+  <h3>4 · "After a deploy, the order service is processing some orders twice."</h3>
+  <ul>
+    <li><strong>Ask:</strong> twice within Kafka, or twice into the database? Auto-commit or manual? Are transactions in use, and how is <code>transactional.id</code> derived? Did the deploy coincide with a rebalance?</li>
+    <li><strong>Likely causes:</strong> commit-after-process reprocessing on rebalance — at-least-once doing exactly what it promises; a hostname-derived <code>transactional.id</code> so the old and new pod never fence each other; a non-idempotent database sink.</li>
+    <li><strong>Fix:</strong> the duplicate is expected; the bug is a sink that cannot absorb it. Idempotency key from <code>(topic, partition, offset)</code> or a business key with a unique constraint. <em>Draws on M6, M7.</em></li>
+  </ul>
+
+  <h3>5 · "A new producer version shipped and two downstream consumers started failing to deserialize."</h3>
+  <ul>
+    <li><strong>Ask:</strong> is there a schema registry, and what compatibility mode is the subject in? Was the field removed, renamed, or had its type changed? Which side was deployed first?</li>
+    <li><strong>Likely causes:</strong> compatibility set to <code>NONE</code>, or a change the mode permits but deploy order did not respect; a consumer using a generated class that cannot read the new shape.</li>
+    <li><strong>Fix:</strong> roll the producer back — records already written stay on the log, so consumers must be fixed to read them regardless. Enforce compatibility in CI, not at runtime. <em>Draws on M8.</em></li>
+  </ul>
+
+  <h2>The cold-retry list</h2>
+  <p>Questions answered from the model rather than attempted, or not yet graded. Retry each cold — no notes, out loud, recorded — then grade. A tick in the quiz counts only after that.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Module</th><th>Questions</th><th>Why on the list</th></tr></thead>
+    <tbody>
+      <tr><td>M0</td><td>Q9 (delayed delivery on Kafka), Q10 (RabbitMQ and Kafka side by side)</td><td>Q9 graded, Q10 answered from the model</td></tr>
+      <tr><td>M2</td><td>Q9 (compacted topic feeding a cache), Q10 (case for tiered storage)</td><td>Answered from the model</td></tr>
+      <tr><td>M3</td><td>All ten</td><td>Answered from the model</td></tr>
+      <tr><td>M4</td><td>All ten</td><td>Answered from the model</td></tr>
+      <tr><td>M5</td><td>All ten</td><td>Answered from the model</td></tr>
+      <tr><td>M6</td><td>All ten</td><td>Lab run, questions not yet graded</td></tr>
+      <tr><td>M7</td><td>All ten</td><td>Not yet graded</td></tr>
+    </tbody>
+  </table></div>
+  <p>That is the 34 queued in the README plus twenty more from M6 and M7. Start with the Senior tier of M3 and M7: replication and transactions are where follow-up probes go deepest.</p>
+
+  <h2>Senior-answer anti-patterns</h2>
+  <div class="callout warn">
+    <span class="tag">Things that cap an answer at "correct but shallow"</span>
+    <ul>
+      <li><strong>Claiming exactly-once.</strong> Without saying "Kafka-to-Kafka", the next question is how the database participates, and there is no good answer to it.</li>
+      <li><strong>"Just add partitions."</strong> It reshuffles keys and breaks per-key ordering, does nothing for a hot key, adds controller and file-handle cost, and cannot be undone.</li>
+      <li><strong>Ignoring ordering.</strong> Any design that parallelises, retries or re-keys must say what happens to order — and whether anyone actually needed it.</li>
+      <li><strong>Not naming the trade-off.</strong> Every knob in this course buys something with something: durability with availability, throughput with latency, ordering with parallelism. An answer that names only the benefit reads as recited.</li>
+      <li><strong>Defaults from the wrong client.</strong> Java client defaults are what interviewers quote; librdkafka's differ.</li>
+      <li><strong>Solving before asking.</strong> In an incident scenario, a fix proposed before scale, keys, ordering needs and the actual symptom are established is a guess.</li>
+    </ul>
+  </div>
+
+  <div class="callout">
+    <span class="tag">What "senior level" means across this whole course</span>
+    <p>Not knowing more settings. Knowing which mechanism a setting acts on, what it costs, and where it stops working — and saying all three without being asked. The rapid-fire round checks the facts; the scenarios and the follow-ups check whether the facts are connected.</p>
+  </div>
+
+  <!--QUIZ:13-mock-interview-->
