@@ -261,6 +261,11 @@ pre .c{color:var(--muted)}
     <a class="wip" href="#q-m11"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
+  <nav>
+    <a class="wip" href="#m12"><span class="n">M12</span><span>System design</span></a>
+    <a class="wip" href="#q-m12"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
   <h3>Not started</h3>
   <nav>
   </nav>
@@ -292,8 +297,8 @@ pre .c{color:var(--muted)}
       <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td><code>in progress</code></td></tr>
       <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td><code>in progress</code></td></tr>
       <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td><code>in progress</code></td></tr>
-      <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td>next</td></tr>
-      <tr><td class="num">M13</td><td>Mock interview, rapid-fire, incident scenarios, senior rubric</td><td>—</td></tr>
+      <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td><code>in progress</code></td></tr>
+      <tr><td class="num">M13</td><td>Mock interview, rapid-fire, incident scenarios, senior rubric</td><td>next</td></tr>
     </tbody>
   </table></div>
 
@@ -1728,6 +1733,148 @@ kafka-acls.sh ... --add --allow-principal User:billing \
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>You need to turn on authentication and ACLs on a live, previously open cluster without an outage. How do you sequence it?</span></label></li>
   </ul>
   <p class="qmeta" data-count-for="m11-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 12</p>
+  <h1>System design with Kafka</h1>
+  <p class="lede">Where every earlier module gets spent at once. A Kafka design interview is not a test of whether you know the API; it is a test of whether you make the five or six decisions that actually matter, in an order that lets each one constrain the next, and say out loud what each one costs.</p>
+
+  <h2 id="m12">A framework you can run every time</h2>
+  <p>The failure mode in a design round is starting with boxes and arrows. Start with the questions whose answers decide the boxes. Run these in order — each one narrows the next.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Decide</th><th>The question that decides it</th><th>Draws on</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td><strong>Requirements</strong></td><td>Throughput (avg and peak), message size, latency budget, retention, how bad is a loss, how bad is a duplicate</td><td>M0</td></tr>
+      <tr><td class="num">2</td><td><strong>Key &amp; ordering</strong></td><td>What must be ordered relative to what? That entity is the key. Everything else is free to reorder</td><td>M1, M5</td></tr>
+      <tr><td class="num">3</td><td><strong>Topics &amp; partitions</strong></td><td>One topic per event type or per entity stream? Partition count from peak throughput, consumer parallelism and headroom — it is hard to change later</td><td>M1, M10</td></tr>
+      <tr><td class="num">4</td><td><strong>Delivery semantics</strong></td><td>At-least-once plus idempotent consumers, or transactions — and where is the boundary with external systems?</td><td>M3, M5, M7</td></tr>
+      <tr><td class="num">5</td><td><strong>Schemas</strong></td><td>Who owns the contract, which compatibility mode, how does a breaking change ship?</td><td>M8</td></tr>
+      <tr><td class="num">6</td><td><strong>Failure modes</strong></td><td>Poison message, slow consumer, broker loss, rebalance storm, region loss — what happens to each, and what does the user see?</td><td>M3, M6, M10</td></tr>
+      <tr><td class="num">7</td><td><strong>Operations</strong></td><td>What is monitored, what alerts, who can write to which topic, how is it replayed?</td><td>M10, M11</td></tr>
+    </tbody>
+  </table></div>
+  <p>Step 2 is the one that separates answers. The key determines ordering, parallelism, hot-partition risk and what a consumer can keep in local state. Choose it from the <em>ordering requirement</em>, not from whatever ID is lying around — and say what is <em>not</em> ordered as a result.</p>
+
+  <div class="callout">
+    <span class="tag">The duplicate question</span>
+    <p>Ask "what happens if this event is processed twice?" for every consumer you draw. If the answer is "nothing, the write is an upsert", you have at-least-once and you are done. If the answer is "the customer is charged twice", you now know where the idempotency key goes — and that is a more useful thing to say than "we use exactly-once".</p>
+  </div>
+
+  <h2>What an event is for: three patterns that get confused</h2>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Payload</th><th>Consumer does</th><th>Coupling</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Event notification</strong></td><td>"Order 42 changed" + ID</td><td>Calls back to the source for details</td><td>Runtime coupling: the source must be up and must scale with every consumer's lookups</td></tr>
+      <tr><td><strong>Event-carried state transfer</strong></td><td>The full new state of order 42</td><td>Keeps its own copy, never calls back</td><td>Schema coupling only; consumers survive the source being down</td></tr>
+      <tr><td><strong>Event sourcing</strong></td><td>Every state change, as the system of record</td><td>Rebuilds state by replaying events</td><td>The log <em>is</em> the database</td></tr>
+    </tbody>
+  </table></div>
+  <p>Event-carried state transfer on a <strong>compacted topic keyed by entity</strong> is the pattern Kafka is best at: the topic is a changelog, the latest value per key is a table, and any new consumer can bootstrap the full current state by reading from the beginning (M2). It is how Kafka Streams' KTables and changelog topics work (M9).</p>
+
+  <h3>Why Kafka is a poor event store</h3>
+  <p>Event sourcing needs to load <em>one aggregate's</em> history to handle a command. Kafka can only read a partition sequentially from an offset — there is no "give me every event for order 42". With order 42 sharing a partition with a million other orders, rebuilding it means scanning them all, or keeping a materialised view that is itself the real store. Nor can it do optimistic concurrency ("append only if the aggregate is still at version 7"). The workable shape is: an event store (or a database with an events table) as the system of record, and Kafka as the <strong>distribution</strong> log that publishes those events — usually via outbox or CDC. Kafka as a projection feed, not as the aggregate store.</p>
+
+  <h3>CQRS read models</h3>
+  <p>The write side publishes events; each read model is a consumer that projects them into whatever shape its queries need — search index, cache, analytics table. Read models are disposable: reset the group's offset and replay to rebuild one, or build a new one alongside the old and switch over. The price is <strong>eventual consistency</strong>, and a read-your-own-writes requirement has to be handled explicitly — return the new state from the write path, or have the client wait on a version — rather than discovered in production.</p>
+
+  <h2>Getting events in: outbox and CDC</h2>
+  <p>Any service that changes its database and must announce it has the dual-write problem from M7. The answer is the same: write the event to an <code>outbox</code> table in the same database transaction, and let CDC (Debezium reading the write-ahead log, M9) publish it. One transaction, one system; the publish is a retriable at-least-once delivery of something already committed. Plain CDC on business tables is the cheaper variant but publishes your schema as a contract — the outbox lets you publish an event designed for consumers instead of an internal row.</p>
+
+  <h2>Sagas: business transactions across services</h2>
+  <p>There is no distributed transaction across services, so a multi-step business process is a sequence of local transactions, each with a <strong>compensating action</strong> that semantically undoes it (refund, release the reservation, cancel the shipment). Compensations are not rollbacks — the intermediate state was visible, and a compensation can itself fail and must be retried until it succeeds.</p>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Choreography</th><th>Orchestration</th></tr></thead>
+    <tbody>
+      <tr><td>How</td><td>Each service reacts to the previous service's events</td><td>A coordinator sends commands and tracks state per saga instance</td></tr>
+      <tr><td>Good at</td><td>Two or three steps, loosely owned, no central team</td><td>Many steps, branching, timeouts, a process someone has to be able to explain</td></tr>
+      <tr><td>Fails as</td><td>No one place shows where order 42 is stuck; cycles appear as services are added</td><td>The orchestrator becomes a god service if it accumulates business logic</td></tr>
+    </tbody>
+  </table></div>
+  <p>Rule of thumb: once a process needs <strong>timeouts</strong> ("cancel if payment has not arrived in 15 minutes"), it wants an orchestrator — a durable workflow engine or a state machine keyed by saga ID — because timeouts in pure choreography have nowhere to live.</p>
+
+  <h2>Retries, DLQs, and what they do to ordering</h2>
+  <p>A message that fails processing has three possible fates, and each costs something different:</p>
+  <ul>
+    <li><strong>Blocking retry</strong> — retry in place with backoff. Preserves ordering. Stalls the whole partition behind one bad message, and long backoffs risk <code>max.poll.interval.ms</code> (M6) — so pause the partition rather than sleeping in the poll loop.</li>
+    <li><strong>Non-blocking retry topics</strong> — publish the failure to <code>orders.retry.1m</code>, <code>orders.retry.10m</code>, then a DLQ, and commit. The main partition keeps flowing. <strong>Ordering for that key is now broken</strong>: the next event for order 42 is processed before the retried one.</li>
+    <li><strong>Dead-letter topic</strong> — park it with headers recording the error, source topic, partition and offset, for inspection and replay. A DLQ nobody alerts on or replays from is just a slower way to lose data.</li>
+  </ul>
+  <div class="callout warn">
+    <span class="tag">The trap</span>
+    <p>Non-blocking retry and per-key ordering are incompatible unless you add machinery. If order matters, either retry blocking, or — when a key has a message in retry — route every later message for that key to the retry path too, which needs a store of "keys currently in retry". Also separate <strong>transient</strong> failures (timeout, 503: retry) from <strong>permanent</strong> ones (deserialization error, validation failure: straight to the DLQ). Retrying a poison message ten times only delays the DLQ.</p>
+  </div>
+
+  <h2>Idempotent consumers</h2>
+  <p>At-least-once is the default, so every consumer with side effects must tolerate redelivery. In order of preference:</p>
+  <ol>
+    <li><strong>Naturally idempotent writes</strong> — upsert on a business key, <code>SET status = 'shipped'</code> rather than <code>count = count + 1</code>.</li>
+    <li><strong>Version or sequence guard</strong> — apply only if the event's version is newer than the stored one. Also defends against reordering.</li>
+    <li><strong>Processed-ID table</strong> — store the event ID (or <code>topic-partition-offset</code>) in the same database transaction as the effect, with a unique constraint.</li>
+    <li><strong>Downstream idempotency key</strong> — for an external API that supports one (payment providers do), derive the key from the event, never generate it at send time.</li>
+  </ol>
+
+  <h2>Request-reply over Kafka, and why it is usually a smell</h2>
+  <p>It can be done: a reply topic, a correlation ID header, a pending-requests map waiting on a future. But the caller is now synchronous on an asynchronous system — latency includes producer batching, consumer polling and possibly a rebalance; replies must be routed back to the one instance holding the future; and timeouts leave orphaned work. If the caller needs an answer now, use RPC. Kafka earns its place when the caller does <em>not</em> need to wait: return <code>202 Accepted</code> with an ID and let the result arrive as an event or a status query.</p>
+
+  <h2>Multi-region</h2>
+  <ul>
+    <li><strong>Stretch cluster</strong> across nearby zones/regions — synchronous replication, RPO zero, but every <code>acks=all</code> write pays the inter-region round trip and the controller quorum (M4) needs a majority to survive a region loss, which wants three locations.</li>
+    <li><strong>Active-passive</strong> with MirrorMaker 2 (M10) — asynchronous, so RPO is the replication lag, and offsets differ between clusters; MM2's checkpointing translates consumer group offsets for failover. Rehearse failover; an untested DR plan is a hope.</li>
+    <li><strong>Active-active</strong> — each region writes locally and mirrors the other's topics under a prefix. Fine for append-only, commutative data (clickstream). For data with a single owner per entity, pin each key's writes to a home region, or accept conflict resolution you have designed rather than discovered.</li>
+  </ul>
+
+  <h2>Worked designs</h2>
+
+  <h3>1 · Order processing</h3>
+  <ul>
+    <li><strong>Key:</strong> <code>orderId</code>. Ordering matters per order (created → paid → shipped); nothing needs ordering across orders. Not <code>customerId</code>: a large B2B customer becomes a hot partition.</li>
+    <li><strong>Topics:</strong> <code>orders.events</code> (event-carried state, via outbox from the order service), <code>payments.events</code>, <code>shipments.events</code>. Partitions sized for peak (Black Friday, not Tuesday) with headroom — say 48 or 64 — because adding partitions later moves keys (M1).</li>
+    <li><strong>Semantics:</strong> at-least-once everywhere, idempotent consumers keyed on <code>orderId</code> + version; payment calls carry an idempotency key derived from the event.</li>
+    <li><strong>Saga:</strong> orchestrated — reserve stock, take payment, ship — with compensations and a payment timeout.</li>
+    <li><strong>Failure modes:</strong> poison event → DLQ with alerting; payment provider outage → blocking retry with paused partitions rather than retry topics, since order state must not be applied out of sequence.</li>
+  </ul>
+
+  <h3>2 · Clickstream / activity analytics</h3>
+  <ul>
+    <li><strong>Requirements flip:</strong> very high volume, small events, duplicates tolerable (aggregates), a little loss arguably tolerable, latency in seconds.</li>
+    <li><strong>Key:</strong> <code>sessionId</code> or <code>userId</code> if sessionisation needs per-user order; otherwise null key and the sticky partitioner (M5) for even spread. Beware bots: one user ID at a thousand events per second is a hot partition.</li>
+    <li><strong>Producer:</strong> high <code>linger.ms</code>, compression (zstd or lz4), large batches — this is a throughput system.</li>
+    <li><strong>Downstream:</strong> Kafka Streams or Flink for windowed aggregates; a sink connector to the warehouse or object storage. Retention short on the raw topic; tiered storage (M2) if replay windows must be long.</li>
+    <li><strong>Semantics:</strong> at-least-once; dedupe on an event ID within a window if counts must be exact.</li>
+  </ul>
+
+  <h3>3 · Payment ledger</h3>
+  <ul>
+    <li><strong>The decision that matters:</strong> the ledger's system of record is a database with double-entry constraints, not Kafka. Kafka distributes ledger entries via outbox; it does not hold the balance.</li>
+    <li><strong>Key:</strong> <code>accountId</code>, so entries for one account apply in order and a balance projection can live in local state.</li>
+    <li><strong>Durability:</strong> RF=3, <code>min.insync.replicas=2</code>, <code>acks=all</code>, unclean leader election off (M3). Retention long or infinite; this topic is audit evidence.</li>
+    <li><strong>Semantics:</strong> transactions for Kafka-to-Kafka projections (balances, fraud features); every external effect behind an idempotency key. Schema compatibility <code>FULL_TRANSITIVE</code> (M8), because old entries are replayed forever.</li>
+    <li><strong>Access:</strong> prefixed ACLs so only the ledger service principal can write (M11).</li>
+  </ul>
+
+  <h2>When the right design has no Kafka in it</h2>
+  <p>Back to M0, now with reasons. Do not reach for Kafka for: a work queue where each task is independent and you want per-message ack, retry and delay (a queue — or Share Groups — fit better); synchronous request-reply; a few hundred events a day between two services (a table and a poller); per-entity lookups of history (a database); or a team with no one to operate it and no managed offering. Saying "I would not use Kafka here, because…" is a strong answer when it is true.</p>
+
+  <div class="callout">
+    <span class="tag">Answering "design an order processing system on Kafka"</span>
+    <p>Start from requirements — peak throughput, latency, and what a duplicate or a loss costs. Key by <code>orderId</code>, because ordering is needed per order and nowhere else, and say that cross-order ordering is deliberately given up. Size partitions for peak with headroom, since changing the count remaps keys. The order service publishes event-carried state via an outbox and CDC, so there is no dual write. Consumers are at-least-once and idempotent on order ID and version, external calls carry idempotency keys, and the multi-step flow is an orchestrated saga with compensations and timeouts. Poison messages go to an alerted DLQ; transient failures retry blocking so per-order state is never applied out of order. Schemas are registered with a compatibility mode, topics are RF=3 with <code>min.insync.replicas=2</code>, and lag per group is the first alert. Then name what the design does not do — no global ordering, eventual consistency in read models — because a design without its trade-offs stated is not finished.</p>
+  </div>
+
+    <h2 id="q-m12">Interview questions — module 12</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m12-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>How do you choose the message key for a topic?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What is the difference between event notification and event-carried state transfer?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is a dead-letter topic and what should go into it?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Why does non-blocking retry with retry topics break ordering, and what are the alternatives?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>How do you make a consumer idempotent?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Choreography or orchestration for a saga — how do you choose?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A team proposes using Kafka as the event store for an event-sourced system. Evaluate it.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design a payment ledger that uses Kafka. What does Kafka do and what does it not do?</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A service needs a synchronous answer from another service, and the team wants to do request-reply over Kafka. What do you say?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Design multi-region for a Kafka-based order platform. What do you have to decide?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m12-questions">0 / 10</p>
 
 
   <h2 id="a-m0">Model answers — module 0</h2>

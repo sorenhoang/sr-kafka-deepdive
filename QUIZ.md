@@ -1197,3 +1197,102 @@ Kafka has no tenant concept, so isolation is assembled. **Identity:** every team
 The rule is that each step must be reversible and must not break any existing client. **1. Add, don't replace, listeners:** add a `SASL_SSL` listener alongside the existing `PLAINTEXT` one, with advertised addresses reachable by clients, and roll the brokers. Nothing changes for existing clients. Move inter-broker and controller traffic to secured listeners in their own rolls, and make the broker principals `super.users` (or grant `ClusterAction`) before any authorizer exists. **2. Migrate clients to authenticate:** each service gets its own principal and moves to the new listener. Watch per-listener connection metrics to see who is still on plaintext. **3. Enable the authorizer permissively:** set the `StandardAuthorizer` with `allow.everyone.if.no.acl.found=true`, so resources with no ACLs stay open. Now write ACLs — prefixed per team where naming allows — resource by resource; once a resource has *any* ACL, it is closed to everyone not granted, so do it per resource with the owning team. Use authorizer logging of denials to catch missing grants, especially the forgotten ones: group `Read` for consumers, `TransactionalId` `Write` for transactional producers. **4. Close the defaults:** once denial logs are quiet, set `allow.everyone.if.no.acl.found=false`, then remove the plaintext listener after its connection count reaches zero. **5. Make revocation real:** set `connections.max.reauth.ms`, since without it a connection authenticated before a credential change stays authenticated indefinitely. Rotation is then a process — CA overlap for certificates via dynamic keystore and truststore updates, new-principal-then-cutover for SCRAM — rather than an emergency. The common failure modes are exactly the shortcuts: enabling the authorizer before the brokers are super users (the cluster denies itself), flipping `allow.everyone.if.no.acl.found` to false globally on day one, or removing plaintext while a forgotten batch job still uses it.
 
 </details>
+
+
+## M12 · System design with Kafka
+
+### Junior
+
+**M12.1** — How do you choose the message key for a topic?
+
+<details>
+<summary>Answer</summary>
+
+From the **ordering requirement**: whatever entity must have its events processed in order is the key, because Kafka only orders within a partition and the key decides the partition. Order lifecycle events are keyed by `orderId`; account ledger entries by `accountId`. Everything not sharing a key is free to reorder, which is what buys parallelism. Then check the key for skew — a key with a disproportionate share of traffic becomes a hot partition — and if nothing needs ordering at all, a null key with the sticky partitioner spreads load evenly.
+
+</details>
+
+**M12.2** — What is the difference between event notification and event-carried state transfer?
+
+<details>
+<summary>Answer</summary>
+
+**Event notification** says something changed and carries little more than an ID; consumers call back to the source for details, so the source must be up and must absorb every consumer's lookups — runtime coupling. **Event-carried state transfer** carries the full new state, so consumers keep their own copy and never call back; coupling is reduced to the schema. The second fits Kafka well, especially on a compacted topic keyed by entity, where the topic becomes a changelog any new consumer can bootstrap from.
+
+</details>
+
+**M12.3** — What is a dead-letter topic and what should go into it?
+
+<details>
+<summary>Answer</summary>
+
+A topic where messages that cannot be processed are parked so they stop blocking or being retried forever. Each entry should carry the original payload plus headers recording the error, the source topic, partition and offset, and a timestamp, so it can be diagnosed and replayed. Permanent failures — deserialization errors, validation failures — should go there directly rather than after a round of pointless retries. A DLQ with no alert on it and no replay procedure is just a slower way to lose data.
+
+</details>
+
+### Mid
+
+**M12.4** — Why does non-blocking retry with retry topics break ordering, and what are the alternatives?
+
+<details>
+<summary>Answer</summary>
+
+A failed message is published to a retry topic and the original offset is committed so the main partition keeps flowing. The next message for the **same key** is then processed from the main topic before the failed one comes back from the retry topic — per-key order is gone. Alternatives: **blocking retry** in place with backoff, pausing the partition rather than sleeping in the poll loop so `max.poll.interval.ms` is not exceeded — order kept, partition stalled; or keep non-blocking retry but **route later messages for a key already in retry** to the retry path too, which needs a store of keys currently in retry. Which to pick depends on whether per-key order actually matters for that consumer, and separating transient from permanent failures keeps either approach from wasting time on poison messages.
+
+</details>
+
+**M12.5** — How do you make a consumer idempotent?
+
+<details>
+<summary>Answer</summary>
+
+In order of preference: make the write **naturally idempotent** — an upsert on a business key, setting a value rather than incrementing it; add a **version or sequence guard** so an event is applied only if it is newer than the stored state, which also defends against reordering; record a **processed event ID** (or `topic-partition-offset`) in the same database transaction as the effect, with a unique constraint; and for an external API, pass an **idempotency key derived from the event**, never one generated at send time, because a redelivery would generate a new one. The point is that the dedupe check and the effect must commit atomically — a check in one transaction and the write in another just moves the race.
+
+</details>
+
+**M12.6** — Choreography or orchestration for a saga — how do you choose?
+
+<details>
+<summary>Answer</summary>
+
+**Choreography**: each service reacts to the previous one's events. Good for two or three steps owned by different teams with no central coordinator; it degrades as steps are added, because no single place shows where a given instance is stuck and implicit cycles appear. **Orchestration**: a coordinator issues commands and tracks state per saga instance. Better for many steps, branching, and especially **timeouts** — "cancel the order if payment has not arrived in 15 minutes" needs a durable timer, which has nowhere to live in pure choreography. The risk of orchestration is the orchestrator accumulating business logic; keep it to sequencing and compensation. Either way, every step needs a compensating action, compensations must be retried until they succeed, and they are semantic undos rather than rollbacks — the intermediate state was visible.
+
+</details>
+
+### Senior
+
+**M12.7** — A team proposes using Kafka as the event store for an event-sourced system. Evaluate it.
+
+<details>
+<summary>Answer</summary>
+
+Event sourcing needs two things from its store, and Kafka provides neither well. **Per-aggregate reads:** to handle a command you load one aggregate's history. Kafka reads a partition sequentially from an offset; there is no index by key, so rebuilding order 42 means scanning a partition shared with every other order hashed there, or keeping a materialised view — at which point the view is the real store and Kafka is a feed. Topic-per-aggregate does not scale: partitions are a cluster-wide resource with real metadata and file-handle cost. **Optimistic concurrency:** a command must append only if the aggregate is still at the version it read. Kafka has no conditional append — two writers can both append against version 7 and the conflict is discovered after the fact, if at all. Smaller issues: retention and compaction semantics must be configured never to drop history (compaction would keep only the latest event per key, which destroys the point), and schema evolution must be `FULL_TRANSITIVE` because every old event is replayed forever. **What I would propose instead:** a store built for this — an event store, or a relational table of events with `(aggregate_id, version)` as a unique key, which gives both indexed reads and optimistic concurrency for free — as the system of record, publishing to Kafka via outbox or CDC. Kafka then does what it is good at: distributing events to projections, read models, analytics and other services, with replay for rebuilding them. Kafka Streams with a state store can make a narrow version work when commands for a key are always routed through the same partition and processed single-threaded — that is genuinely viable, but it is a different architecture with its own operational weight, and it should be chosen on purpose rather than arrived at because Kafka was already there.
+
+</details>
+
+**M12.8** — Design a payment ledger that uses Kafka. What does Kafka do and what does it not do?
+
+<details>
+<summary>Answer</summary>
+
+**The ledger itself does not live in Kafka.** The system of record is a database enforcing double-entry invariants — debits equal credits, balances never negative where that matters — inside one transaction, which Kafka cannot do. Kafka **distributes** committed ledger entries: the ledger service writes entries and an outbox row in one database transaction, and CDC publishes them. **Key** by `accountId`, so entries for an account are ordered and downstream balance projections can hold per-account state locally. **Durability** settings are non-negotiable: RF=3, `min.insync.replicas=2`, `acks=all`, idempotent producer, unclean leader election disabled; retention long or infinite with tiered storage if needed, because the topic is audit evidence and the source for rebuilding projections. **Semantics:** Kafka-to-Kafka projections — balances, fraud features, reporting aggregates — can use transactions for exactly-once; anything external, such as calling a payment provider, carries an idempotency key derived from the entry ID, because the external system is outside the transaction boundary. **Schemas** registered with `FULL_TRANSITIVE` compatibility, since entries are replayed indefinitely. **Security:** prefixed ACLs so only the ledger service principal can produce to ledger topics, consumers get read-only access, and the topics are encrypted in transit. **Failure modes to name:** a poison entry must block rather than skip — skipping a ledger entry corrupts every balance after it, so DLQ here means stop and page, not park and continue; projection drift is detected by periodically reconciling projected balances against the database. The senior point is the first sentence: put the invariant where it can be enforced atomically, and use Kafka for what follows from it.
+
+</details>
+
+**M12.9** — A service needs a synchronous answer from another service, and the team wants to do request-reply over Kafka. What do you say?
+
+<details>
+<summary>Answer</summary>
+
+That it works and is usually the wrong tool. Mechanically: a request topic, a reply topic, a correlation ID in a header, and a map of pending futures. The problems: **latency** now includes producer batching, consumer poll intervals and any rebalance on either side — a rebalance turns a 50 ms call into seconds; **routing** — the reply must reach the one instance holding the future, which means a reply partition or topic per instance, or every instance reading every reply and discarding most; **timeouts** leave orphaned work, since the responder will still process a request whose caller gave up, so requests need deadlines the responder checks; and **coupling** is as tight as RPC while debugging is harder. Questions I would ask: does the caller really need the answer before responding to its own client? Often not — return `202 Accepted` with an ID and deliver the outcome as an event, a webhook, or a status endpoint, which is where Kafka earns its place. If the answer is needed synchronously, use RPC (HTTP or gRPC) with timeouts, retries and a circuit breaker, and keep Kafka for the asynchronous consequences. The narrow case where request-reply over Kafka is defensible is when the request itself must be durable and replayable, or when the responder is a batch-oriented worker pool — and even then I would want it as an explicit, documented exception.
+
+</details>
+
+**M12.10** — Design multi-region for a Kafka-based order platform. What do you have to decide?
+
+<details>
+<summary>Answer</summary>
+
+First the **RPO and RTO** the business actually needs, because they choose the topology. **Stretch cluster** across three nearby locations: synchronous replication with `acks=all` and replicas placed across locations via rack awareness, so RPO is zero, but every write pays the inter-location round trip and the controller quorum needs a majority to survive a location loss, which is why it wants three sites, not two. Viable only when latency between sites is low. **Active-passive** with MirrorMaker 2: replication is asynchronous, so RPO equals mirror lag and must be monitored as an SLO; offsets differ between clusters, so consumer failover depends on MM2's checkpointed offset translation, and consumers must be idempotent because translation is approximate and some reprocessing is expected. **Active-active**: each region produces locally and mirrors the other's topics under a prefix; consumers read both. Natural for append-only, commutative data; dangerous for orders, because two regions can modify the same order concurrently. For orders I would **pin each order to a home region** — route by customer or order ID — so each key has one writer, and the other region holds a replica for reads and failover. Then the things people forget: schema registry and ACLs must exist in both regions; producers and consumers need a tested way to switch clusters (DNS or config, not a redeploy); failover must be **rehearsed**, including failback, which is usually harder; and the sagas' timers and the outbox publishers must not run in both regions at once. The senior answer names the trade-off — synchronous costs latency, asynchronous costs data on failover — and chooses based on the stated RPO rather than defaulting to active-active because it sounds most resilient.
+
+</details>
