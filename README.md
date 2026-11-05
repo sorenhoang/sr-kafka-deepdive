@@ -12,7 +12,8 @@ Each module follows the same four steps:
 2. **Hands-on lab** — a runnable Docker cluster and scripts, with a worksheet that
    walks the steps one at a time. Every step asks for a prediction before the command
    is run, because the prediction is where the learning is; reading the output
-   afterwards only confirms what was already seen.
+   afterwards only confirms what was already seen. **Labs run through M6 only** —
+   from M7 the course is theory and depth by choice, and the `Lab` column reads `n/a`.
 3. **Tiered questions** — Junior → Mid → Senior. Senior answers get written out and
    graded against *missing the point / correct but shallow / senior level*.
 4. **Answers** — the senior-tier questions get answered in writing and graded. Only
@@ -49,8 +50,8 @@ M3, M4 and M5.
 | M3 | Replication, ISR, LEO vs high watermark, unclean leader election | ready | ✅ | model |
 | M4 | KRaft: quorum controller, metadata log | ready | ✅ | model |
 | M5 | Producer internals, idempotent producer | ready | ✅ | model |
-| M6 | Consumer internals, rebalance, KIP-848 | ready | | |
-| M7 | Delivery semantics, transactions, exactly-once | | | |
+| M6 | Consumer internals, rebalance, KIP-848 | ready | ✅ | |
+| M7 | Delivery semantics, transactions, exactly-once | ready | n/a | |
 | M8 | Schema Registry, compatibility, evolution | | | |
 | M9 | Connect, CDC/Debezium, Kafka Streams | | | |
 | M10 | Partition sizing, monitoring, production incidents | | | |
