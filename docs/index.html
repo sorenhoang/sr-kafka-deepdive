@@ -246,6 +246,11 @@ pre .c{color:var(--muted)}
     <a class="wip" href="#q-m8"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
+  <nav>
+    <a class="wip" href="#m9"><span class="n">M9</span><span>Connect &amp; Streams</span></a>
+    <a class="wip" href="#q-m9"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
   <h3>Not started</h3>
   <nav>
   </nav>
@@ -274,8 +279,8 @@ pre .c{color:var(--muted)}
       <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td><code>done</code></td></tr>
       <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td><code>in progress</code></td></tr>
       <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td><code>in progress</code></td></tr>
-      <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td>next</td></tr>
-      <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td>—</td></tr>
+      <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td><code>in progress</code></td></tr>
+      <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td>next</td></tr>
       <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td>—</td></tr>
       <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td>—</td></tr>
       <tr><td class="num">M13</td><td>Mock interview, rapid-fire, incident scenarios, senior rubric</td><td>—</td></tr>
@@ -1327,6 +1332,122 @@ bytes 5..   [Protobuf only: message-index array, which message in the .proto]
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Avro, Protobuf or JSON Schema for a company's event platform — how do you decide, and what do you enforce regardless?</span></label></li>
   </ul>
   <p class="qmeta" data-count-for="m8-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 9</p>
+  <h1>Connect, CDC &amp; Kafka Streams</h1>
+  <p class="lede">The ecosystem around the log: Connect moves data in and out, Debezium turns a database's own log into a topic, and Streams processes topics without a separate cluster. Each one is mostly configuration — and each one has a single operational fact that decides whether it works in production.</p>
+
+  <h2 id="m9">Kafka Connect: a runtime, not a library</h2>
+  <p>Connect is a separate JVM process — a <strong>worker</strong> — that runs plugins. You do not write producer or consumer code; you submit JSON config over a REST API and the worker runs it. Three nouns, which interviews mix up:</p>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Is</th><th>Scales by</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Connector</strong></td><td>The logical job: "copy table X to topic Y". Decides how to split the work</td><td>—</td></tr>
+      <tr><td><strong>Task</strong></td><td>The unit that actually moves data. A connector produces up to <code>tasks.max</code> tasks</td><td>Number of tasks, bounded by what the source can be split into</td></tr>
+      <tr><td><strong>Worker</strong></td><td>The process tasks run in</td><td>Adding workers to the same group</td></tr>
+    </tbody>
+  </table></div>
+  <p><code>tasks.max</code> is a ceiling, not a request. A sink reading a 6-partition topic gets at most 6 useful tasks; a Postgres source connector reading one replication slot gets exactly one. Raising <code>tasks.max</code> past what the source can split into does nothing.</p>
+
+  <h3>Distributed mode keeps its state in Kafka</h3>
+  <p>Workers sharing a <code>group.id</code> form a cluster and balance connectors and tasks between them using the group protocol — incremental cooperative rebalancing, so adding a worker moves some tasks rather than stopping all of them. All state lives in three compacted topics:</p>
+  <ul>
+    <li><code>config.storage.topic</code> — connector configs. <strong>Must be one partition</strong>, because config order matters.</li>
+    <li><code>offset.storage.topic</code> — source connector positions (an LSN, a binlog coordinate, a file offset). Sink connectors do not use it: they are ordinary consumers and commit to <code>__consumer_offsets</code> under group <code>connect-&lt;name&gt;</code>.</li>
+    <li><code>status.storage.topic</code> — connector and task state.</li>
+  </ul>
+  <p>The same move as M4 and M7: a distributed system that needs durable coordination state writes it to Kafka. A worker is stateless and replaceable; deleting or mis-retaining these topics is what loses things. They must be compacted, never delete-retention — a source offset expiring means the connector restarts from scratch.</p>
+
+  <h3>Converters and SMTs do different jobs</h3>
+  <ul>
+    <li><strong>Converter</strong> — bytes ↔ Connect's internal record. Set per worker or per connector as <code>key.converter</code> / <code>value.converter</code>: JSON, Avro, Protobuf, String. This is where Schema Registry (M8) plugs in.</li>
+    <li><strong>SMT</strong> (single message transform) — a stateless per-record function: rename a field, route to a different topic, mask a column, extract a key. Optionally gated by a predicate.</li>
+  </ul>
+  <p>SMTs are for shape, not logic. One record in, zero or one out, no state, no lookups, no joins. The moment you want any of those you want Streams or Flink, and an SMT chain that has grown to eight entries is usually a stream processor that nobody admitted to building.</p>
+
+  <h3>Errors, and what the DLQ actually catches</h3>
+  <p><code>errors.tolerance=none</code> (the default) fails the task on the first bad record. <code>all</code> skips it — logged with <code>errors.log.enable</code>, and for sink connectors routed to <code>errors.deadletterqueue.topic.name</code>, with the failure reason in headers if <code>errors.deadletterqueue.context.headers.enable</code> is on.</p>
+  <div class="callout warn">
+    <span class="tag">The gap in the DLQ</span>
+    <p>The dead-letter queue covers failures in <strong>conversion and transformation</strong> — the stages the framework runs. A failure inside the connector's own write to the target, such as a constraint violation in the database, is only routed to the DLQ if the connector reports it through the errant-record reporter (KIP-610). Many do not, so a sink can fail its task on a bad row even with <code>errors.tolerance=all</code> configured. And the DLQ exists only for sinks; a source has nowhere to put a record it could not read.</p>
+    <p><code>errors.tolerance=all</code> without anyone watching the DLQ is at-most-once with extra steps.</p>
+  </div>
+
+  <h3>Delivery semantics on each side</h3>
+  <p><strong>Sinks</strong> are consumers that commit after writing, so they are at-least-once. Exactly-once into an external system is the M7 boundary again: it exists only if the connector makes the write idempotent (upsert on a key, a deterministic file name per offset range) or stores the offsets in the target in the same transaction as the data.</p>
+  <p><strong>Sources</strong> were at-least-once until KIP-618, which added exactly-once source support: with <code>exactly.once.source.support=enabled</code> on the workers, each task writes its records <em>and its source offsets</em> in one Kafka transaction — consume-transform-produce where the "consume" side is an external system. It needs the connector to support it and the cluster to allow transactions, and downstream readers still need <code>read_committed</code> for it to mean anything.</p>
+
+  <h2>CDC with Debezium</h2>
+  <p>Change data capture reads the database's <strong>own replication log</strong> — the Postgres WAL via logical decoding (<code>pgoutput</code>), the MySQL binlog — and emits one event per row change with before and after images. It does not poll tables, so it sees every change including deletes, in commit order, with no load from queries.</p>
+  <p>A connector starts with a <strong>snapshot</strong> — a consistent read of existing rows — then switches to <strong>streaming</strong> from the log position the snapshot was taken at, so nothing falls in the gap. Incremental snapshots let you re-snapshot a table later while streaming continues, which matters because a full blocking snapshot of a large table can take hours.</p>
+  <p>Events are keyed by primary key, so changes to one row land on one partition in order. That is the ordering guarantee: <strong>per row</strong>. Not per transaction and not across tables — a transaction touching an order and its line items produces events on different partitions of different topics, and consumers that need them together have to reassemble them, using Debezium's transaction metadata if enabled.</p>
+
+  <div class="callout warn">
+    <span class="tag">The CDC incident: the replication slot fills the disk</span>
+    <p>Postgres keeps WAL until every <strong>replication slot</strong> has confirmed it. If the Debezium connector stops — crashed task, paused connector, deleted connector with the slot left behind — the slot stops advancing and Postgres retains WAL forever. Disk on the <em>primary database</em> grows until it fills, and a CDC outage becomes a production database outage.</p>
+    <p>The quieter variant: the connector is healthy but watches a low-traffic database on a busy server. WAL is server-wide, so other databases' writes accumulate behind a slot that never sees a change worth confirming. Debezium's <code>heartbeat.interval.ms</code> (with a <code>heartbeat.action.query</code> writing to a heartbeat table) forces periodic progress.</p>
+    <p>Defences: alert on slot lag (<code>pg_replication_slots</code>, retained WAL bytes), set <code>max_slot_wal_keep_size</code> so Postgres invalidates the slot rather than filling the disk — trading a re-snapshot for an outage — and drop slots as part of decommissioning a connector. MySQL fails the other way: the binlog is purged on its own schedule, and a connector down longer than binlog retention has lost its position and must re-snapshot.</p>
+  </div>
+
+  <h3>The outbox, finished</h3>
+  <p>M7's outbox pattern needed a relay from the <code>outbox</code> table to Kafka. Debezium is that relay: it reads outbox inserts from the WAL, and the <strong>outbox event router</strong> SMT routes each row to a topic by its aggregate type and keys it by aggregate id, so events for one aggregate stay ordered. No polling, no "mark as sent" update, and the order is the commit order. Rows can be deleted immediately after insert — the WAL entry is what gets captured.</p>
+
+  <h2>Kafka Streams: a library, not a cluster</h2>
+  <p>Streams is a Java library inside your application. There is no Streams cluster to run: you deploy more instances of your service and they share the work as members of one consumer group (the <code>application.id</code>). Kafka itself is the only infrastructure — for input, output, coordination <em>and state durability</em>.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Abstraction</th><th>A record means</th><th>Backed by</th></tr></thead>
+    <tbody>
+      <tr><td><strong>KStream</strong></td><td>An event. Each one is independent</td><td>A topic, read as a stream</td></tr>
+      <tr><td><strong>KTable</strong></td><td>An update. Latest value per key wins; <code>null</code> deletes</td><td>A local state store over this instance's partitions</td></tr>
+      <tr><td><strong>GlobalKTable</strong></td><td>An update, but every instance holds <em>every</em> partition</td><td>A full local copy per instance</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>State lives locally and is made durable in Kafka</h3>
+  <p>Stateful operations — aggregations, joins, windowing — use <strong>state stores</strong>, RocksDB by default, on local disk. Every write to a store is also written to a compacted <strong>changelog topic</strong>. The local disk is a cache; the changelog is the truth. Lose the instance and another one rebuilds the store by replaying the changelog.</p>
+  <p>That replay is the real recovery cost. A 50 GB store restores at whatever rate the instance can fetch and write RocksDB, and the task does nothing else until it finishes. <strong>Standby replicas</strong> (<code>num.standby.replicas</code>) keep warm copies on other instances so failover is a short catch-up rather than a full restore — the same trade as Kafka's own replication factor, paid in disk and network for recovery time.</p>
+
+  <h3>Tasks, partitions and repartitioning</h3>
+  <p>Streams splits a topology into <strong>tasks</strong>, one per input partition; tasks are distributed across stream threads (<code>num.stream.threads</code>) and instances. Parallelism is capped by partition count, exactly like a consumer group.</p>
+  <p>Any operation that changes the key before a stateful step — <code>selectKey</code>, <code>map</code>, <code>groupBy</code> on a new field — forces a <strong>repartition topic</strong>: Streams writes the records back to Kafka keyed by the new key so that all records for one key reach one task. It is correct and it is a full extra write and read of the data, which is why a topology with three hidden repartitions is three times the traffic it looks like. <code>Topology.describe()</code> shows them.</p>
+  <div class="callout warn">
+    <span class="tag">Co-partitioning — the join requirement that fails at runtime</span>
+    <p>A KStream–KTable or KStream–KStream join works by joining partition <em>n</em> of one input with partition <em>n</em> of the other, inside one task. So both inputs must have the <strong>same number of partitions</strong> and be keyed and partitioned the same way. Mismatched partition counts are rejected when the app starts; a different partitioner on one producer is not detected at all, and the join silently misses. A GlobalKTable is exempt, because every instance has all of it — which is its purpose, and its cost.</p>
+  </div>
+
+  <h3>Exactly-once and time</h3>
+  <p><code>processing.guarantee=exactly_once_v2</code> is M7's consume-transform-produce applied to the whole topology: output records, changelog writes and input offsets commit in one transaction per commit interval. It works because everything Streams touches is Kafka — and stops at the same boundary for anything the application does outside it.</p>
+  <p>Windowed aggregations group by <strong>event time</strong>, the timestamp in the record, not arrival time. Records arriving after their window closed are late; the <strong>grace period</strong> decides how long a window stays open for them, after which they are dropped. Longer grace means more correct results and more state held longer. Results are emitted as updates while the window is open, so a downstream consumer sees intermediate counts unless you use <code>suppress</code> to emit only the final value. The older API defaulted to a 24-hour grace silently; the current API makes you choose one, which is the right default.</p>
+
+  <h2>When Flink instead</h2>
+  <ul>
+    <li><strong>Streams</strong> — Kafka in, Kafka out, logic that belongs inside a service you already deploy, state that restores in acceptable time. No new cluster to operate.</li>
+    <li><strong>Flink</strong> — sources and sinks beyond Kafka, very large state (incremental checkpoints to object storage rather than replaying a changelog), event-time logic across many inputs, SQL as the interface, or a platform team running many jobs centrally.</li>
+  </ul>
+  <p>The honest decision point is operational: Streams costs you nothing new to run but ties recovery time to changelog replay; Flink recovers faster from checkpoints and handles more, at the price of a cluster and a team that understands it.</p>
+
+  <div class="callout">
+    <span class="tag">Answering "how would you get changes from Postgres into Kafka?"</span>
+    <p>CDC with Debezium on Kafka Connect, reading the WAL through a replication slot — not polling, because polling misses deletes and intermediate updates and loads the database. Snapshot first, then stream from the snapshot's position. Ordering is per primary key, not per transaction. The thing I would set up on day one is monitoring of the replication slot's retained WAL, plus <code>max_slot_wal_keep_size</code>, because a stopped connector otherwise fills the primary's disk. If the goal is publishing domain events rather than table changes, I would put an outbox table in front and use the outbox event router, so the topic carries a contract rather than the schema of an internal table.</p>
+  </div>
+
+    <h2 id="q-m9">Interview questions — module 9</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m9-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>What is the difference between a connector, a task and a worker in Kafka Connect?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What is the difference between a KStream, a KTable and a GlobalKTable?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>What is CDC, and why is reading the database log better than polling a table?</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Where does a distributed Connect cluster keep its state, and what goes wrong if those topics are misconfigured?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>What is a repartition topic in Kafka Streams, when is one created, and why should you care?</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>Converters versus SMTs: what does each do, and where do they stop being the right tool?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Disk on your primary Postgres is filling up, and the growth is pg_wal. You run Debezium. Diagnose it and say how you'd prevent it.</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A Kafka Streams app with a large aggregation takes 40 minutes to recover whenever an instance dies. Why, and what are your options?</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Two teams want to join an orders stream against a customers table in Kafka Streams. The join returns nulls for some customers that definitely exist. What do you check?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Kafka Streams or Flink for a new stream-processing workload — how do you decide?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m9-questions">0 / 10</p>
 
 
   <h2 id="a-m0">Model answers — module 0</h2>

@@ -53,7 +53,7 @@ M3, M4 and M5.
 | M6 | Consumer internals, rebalance, KIP-848 | ready | ✅ | |
 | M7 | Delivery semantics, transactions, exactly-once | ready | n/a | |
 | M8 | Schema Registry, compatibility, evolution | ready | n/a | |
-| M9 | Connect, CDC/Debezium, Kafka Streams | | | |
+| M9 | Connect, CDC/Debezium, Kafka Streams | ready | n/a | |
 | M10 | Partition sizing, monitoring, production incidents | | | |
 | M11 | TLS, SASL, ACLs, multi-tenancy | | | |
 | M12 | System design with Kafka | | | |

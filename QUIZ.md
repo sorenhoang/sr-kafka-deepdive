@@ -886,3 +886,102 @@ That it is not a schema change, it is a **repartitioning**, and it should be tre
 The format matters less than the enforcement, so I would decide on fit and then spend the effort on the process. **Avro** is the default for data platforms: smallest encoding, the strongest evolution story via writer/reader schema resolution and defaults, and first-class support in Connect, Debezium and analytics tooling. Its cost is that payloads are undecodable without the registry, and code generation is weaker in some languages. **Protobuf** fits organisations already on gRPC: one IDL for RPC and events, excellent codegen, and evolution by field number that is easy to reason about — provided nobody reuses a number, and accepting that proto3 cannot distinguish an absent field from a zero value without `optional`. **JSON Schema** gives human-readable payloads and the lowest barrier for teams, at the cost of size, slower parsing, and compatibility rules around the open/closed content model that surprise people used to Avro. Mixing formats across topics is fine; mixing within a topic is not. What I would enforce regardless: schemas in version control next to the producing service; `auto.register.schemas=false` in production, with registration and the compatibility check in CI so an incompatible change fails a build rather than a consumer; transitive compatibility because Kafka replays old data; one owning team per topic, with deprecation rather than deletion and no hard-deleting schema versions that still have data; ACLs so only the owner can produce; and a dead-letter path for records that still fail. Schemas are where the outbox pattern (M7) pays off as well — the event shape is reviewed with the business change rather than invented in a publishing helper. The point to land: a registry turns schema compatibility from a hope into a gate, but only if nothing can route around it.
 
 </details>
+
+
+## M9 · Connect, CDC & Kafka Streams
+
+### Junior
+
+**M9.1** — What is the difference between a connector, a task and a worker in Kafka Connect?
+
+<details>
+<summary>Answer</summary>
+
+A **connector** is the logical job — "copy this table to that topic" — and decides how to split the work. A **task** is the unit that actually moves data; a connector creates up to `tasks.max` of them. A **worker** is the JVM process tasks run in, and workers sharing a `group.id` form a distributed Connect cluster. `tasks.max` is a ceiling: a sink on a 6-partition topic gets at most 6 useful tasks, and a Postgres CDC source reading one replication slot gets exactly one.
+
+</details>
+
+**M9.2** — What is the difference between a KStream, a KTable and a GlobalKTable?
+
+<details>
+<summary>Answer</summary>
+
+A **KStream** treats each record as an independent event. A **KTable** treats each record as an update: the latest value per key wins and a `null` value deletes the key; it is materialised in a local state store over only the partitions this instance owns. A **GlobalKTable** is also a table, but every instance holds a full copy of every partition — which removes the co-partitioning requirement for joins against it, at the cost of every instance storing and reading all of it.
+
+</details>
+
+**M9.3** — What is CDC, and why is reading the database log better than polling a table?
+
+<details>
+<summary>Answer</summary>
+
+Change data capture emits an event for every row change by reading the database's own replication log — the Postgres WAL via logical decoding, the MySQL binlog. Polling (`WHERE updated_at > ?`) misses deletes, misses intermediate updates between polls, needs an indexed timestamp column every writer maintains correctly, and puts query load on the database. Reading the log sees every change, including deletes, in commit order, with before and after images.
+
+</details>
+
+### Mid
+
+**M9.4** — Where does a distributed Connect cluster keep its state, and what goes wrong if those topics are misconfigured?
+
+<details>
+<summary>Answer</summary>
+
+In three compacted Kafka topics: `config.storage.topic` (connector configs, must be **one partition** because order matters), `offset.storage.topic` (source connector positions — LSN, binlog coordinates, file offsets) and `status.storage.topic` (connector and task state). Sink connectors don't use the offset topic; they are consumers and commit to `__consumer_offsets` as group `connect-<name>`. Workers are stateless and replaceable — the topics are what matter. If they use delete retention instead of compaction, a source connector's offset can expire and it restarts from scratch (for CDC, a full re-snapshot); a multi-partition config topic can reorder config updates.
+
+</details>
+
+**M9.5** — What is a repartition topic in Kafka Streams, when is one created, and why should you care?
+
+<details>
+<summary>Answer</summary>
+
+When an operation changes the key — `selectKey`, `map`, `groupBy` on a new field — before a stateful operation, Streams writes the records back to an internal topic keyed by the new key, so that every record for one key reaches the same task. That is the only way an aggregation or join on the new key can be correct. You care because it is a full extra write and read of the data through the brokers, plus the extra latency and storage: a topology with three implicit repartitions moves three times the bytes it looks like it does. `Topology.describe()` shows them, and choosing the key early (or keying at the producer) often removes one.
+
+</details>
+
+**M9.6** — Converters versus SMTs: what does each do, and where do they stop being the right tool?
+
+<details>
+<summary>Answer</summary>
+
+A **converter** turns bytes into Connect's internal record and back — JSON, Avro, Protobuf, String — and is where Schema Registry plugs in. An **SMT** is a stateless per-record transform: rename or drop a field, mask a value, route to another topic, extract a key, optionally gated by a predicate. SMTs stop being right as soon as you need state, lookups, joins, aggregation or one-to-many output. A long SMT chain is usually a stream processor nobody admitted to building — move that logic into Streams or Flink where it can be tested and reasoned about.
+
+</details>
+
+### Senior
+
+**M9.7** — Disk on your primary Postgres is filling up, and the growth is pg_wal. You run Debezium. Diagnose it and say how you'd prevent it.
+
+<details>
+<summary>Answer</summary>
+
+Start with the replication slots: `pg_replication_slots`, comparing each slot's `restart_lsn` / `confirmed_flush_lsn` with the current WAL position to see retained bytes per slot. Postgres keeps WAL until **every** slot has confirmed it, so one slot that stopped advancing pins WAL indefinitely. The usual causes: the Debezium task has failed or the connector is paused, and nobody alerted on task state; the connector was deleted but its slot was left behind; or — the subtle one — the connector is healthy but captures a low-traffic database on a busy server, and since WAL is server-wide, other databases' writes pile up behind a slot that never sees a change of its own to confirm. **Immediate fix:** if the connector can be restarted, restart it and watch the slot catch up; if the slot is orphaned or the disk is about to fill, drop the slot — accepting that the connector will need a re-snapshot — because the alternative is the primary database going down. **Prevention:** alert on retained WAL per slot and on Connect task state, not just on the connector existing; set Debezium `heartbeat.interval.ms` with a `heartbeat.action.query` against a heartbeat table so a quiet database still advances its slot; set `max_slot_wal_keep_size` so Postgres invalidates a runaway slot instead of filling the disk — a deliberate trade of a CDC re-snapshot for a database outage, which is the right trade; and make dropping the slot part of decommissioning a connector. The framing worth stating: CDC couples the database's availability to the consumer's health, and the slot is where that coupling lives.
+
+</details>
+
+**M9.8** — A Kafka Streams app with a large aggregation takes 40 minutes to recover whenever an instance dies. Why, and what are your options?
+
+<details>
+<summary>Answer</summary>
+
+The state store is local RocksDB; its durable copy is the compacted **changelog topic**. When an instance dies, its tasks move to another instance which has no local copy, so it must replay the changelog into RocksDB before the task can process again — and recovery time is store size divided by restore throughput. Forty minutes means a big store and/or a slow restore. Options, roughly in order: **standby replicas** (`num.standby.replicas=1`) keep a warm copy on another instance so failover is a short catch-up rather than a full restore — the same trade as replication factor, paid in disk and network; Streams' assignor will also prefer moving a task to where a caught-up copy exists and use warm-up replicas when scaling. **Keep local state across restarts** — a persistent volume for the state directory, so a rolling restart or rescheduled pod reuses its store instead of restoring; stateless containers with ephemeral disks turn every deploy into a full restore. **Shrink the state**: shorter retention on windowed stores, smaller values, aggregating less. **More partitions** spread state across more tasks and restore in parallel, but only helps if decided early, since changing partition count breaks the key-to-task mapping. **Tune the restore consumer** for throughput. And if state is genuinely huge and recovery time is a hard requirement, that is the point where Flink's incremental checkpoints to object storage beat changelog replay. The senior observation: Streams makes state *look* free because there is no database to run, but the changelog replay is the bill, and it arrives during an incident.
+
+</details>
+
+**M9.9** — Two teams want to join an orders stream against a customers table in Kafka Streams. The join returns nulls for some customers that definitely exist. What do you check?
+
+<details>
+<summary>Answer</summary>
+
+Co-partitioning first. A KStream–KTable join joins partition *n* of the stream with partition *n* of the table inside one task, so both topics must have the **same partition count** and records with the same key must land on the **same partition number** in both. Partition count mismatch is caught at startup; what is not caught is a different **partitioner or key serialization** — say, the orders producer keys by customer id as a string with the Java default murmur2, and the customers topic is written by a non-Java client or Connect pipeline that serializes the key differently or uses a different hash. The bytes differ, the partitions differ, and the join silently misses for every key that hashed apart. Check the keys' raw bytes on both topics, not their printed form. Second: **timing**. A stream–table join is a lookup at the moment the stream record is processed; if the customer record arrives on the table after the order, the order joins against nothing. Streams picks records by timestamp across inputs, but a table bootstrapped late, or a customer created after the order, still yields a null — `max.task.idle.ms` makes it wait for both inputs, and a stream–stream join with a window is the right model if both sides are genuinely events. Third: the key was changed upstream (a `selectKey` before the join) and the repartition is fine but the table side is keyed differently. Fixes: re-key one side so both use identical serialization, or use a **GlobalKTable** for customers if it is small enough to replicate to every instance — which removes co-partitioning entirely and lets you join on a field other than the key.
+
+</details>
+
+**M9.10** — Kafka Streams or Flink for a new stream-processing workload — how do you decide?
+
+<details>
+<summary>Answer</summary>
+
+Start from what the workload touches and how it must recover, not from feature lists. **Streams** fits when input and output are Kafka, the logic belongs inside a service the team already deploys, and the team does not want another platform: there is no cluster, scaling is running more instances, and `exactly_once_v2` gives end-to-end exactly-once because everything it touches is Kafka. Its cost is that state recovery is changelog replay — tied to state size — and that every topology is a Java/Kotlin service each team operates themselves. **Flink** fits when sources or sinks go beyond Kafka (files, databases, other queues), when state is very large and recovery time matters (incremental checkpoints to object storage, not replay from a topic), when you need rich event-time handling across many inputs, when analysts want SQL, or when a platform team will run many jobs centrally. Its cost is a cluster, a job lifecycle, checkpoint storage and people who understand it. My default: Streams for service-local enrichment, aggregation and routing over Kafka with modest state; Flink when the state, the source/sink set or the organisation's shape outgrows that. Worth naming the third answer too: if the "processing" is per-record mapping with no state, neither — a plain consumer, or an SMT in Connect, is simpler than both.
+
+</details>
