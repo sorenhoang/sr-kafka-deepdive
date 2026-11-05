@@ -228,6 +228,11 @@ pre .c{color:var(--muted)}
     <a class="wip" href="#q-m7"><span class="n">↳</span><span>Questions</span></a>
   </nav>
 
+  <nav>
+    <a class="wip" href="#m8"><span class="n">M8</span><span>Schema Registry</span></a>
+    <a class="wip" href="#q-m8"><span class="n">↳</span><span>Questions</span></a>
+  </nav>
+
   <h3>Not started</h3>
   <nav>
   </nav>
@@ -255,8 +260,8 @@ pre .c{color:var(--muted)}
       <tr><td rowspan="3">C · Clients</td><td class="num">M5</td><td>Producer internals: batching, sticky partitioner, retries, idempotent producer</td><td><code>done</code></td></tr>
       <tr><td class="num">M6</td><td>Consumer internals: poll loop, offset commits, rebalance, KIP-848</td><td><code>done</code></td></tr>
       <tr><td class="num">M7</td><td>Delivery semantics, transaction coordinator, exactly-once, LSO, outbox</td><td><code>in progress</code></td></tr>
-      <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td>next</td></tr>
-      <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td>—</td></tr>
+      <tr><td rowspan="2">D · Ecosystem</td><td class="num">M8</td><td>Avro / Protobuf, Schema Registry, compatibility &amp; evolution</td><td><code>in progress</code></td></tr>
+      <tr><td class="num">M9</td><td>Connect, CDC / Debezium, Kafka Streams, state stores</td><td>next</td></tr>
       <tr><td rowspan="2">E · Operations</td><td class="num">M10</td><td>Partition sizing, monitoring, hot partitions, rebalance storms, MirrorMaker 2</td><td>—</td></tr>
       <tr><td class="num">M11</td><td>TLS, SASL, ACLs, multi-tenancy</td><td>—</td></tr>
       <tr><td rowspan="2">F · Interview</td><td class="num">M12</td><td>System design with Kafka; event sourcing, outbox, saga</td><td>—</td></tr>
@@ -1205,6 +1210,110 @@ producer.commitTransaction()       <span class="c">// or abortTransaction()</spa
     <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>A read_committed consumer group's lag stops falling and sits flat, with no errors anywhere. Diagnose it.</span></label></li>
   </ul>
   <p class="qmeta" data-count-for="m7-questions">0 / 10</p>
+
+
+  <p class="eyebrow">Module 8</p>
+  <h1>Schemas, the registry &amp; evolution</h1>
+  <p class="lede">Kafka moves bytes and has no opinion about what is in them. Every topic is therefore an API between teams who deploy on different days, and this module is about keeping that API from breaking at 3am on a deploy nobody coordinated.</p>
+
+  <h2 id="m8">The broker does not know what a record is</h2>
+  <p>A record's key and value are byte arrays. The broker stores, replicates and serves them without parsing — which is part of why it is fast (M2: zero-copy only works if nobody looks inside). The consequence is that the <strong>contract lives entirely in the clients</strong>: the producer's serializer and the consumer's deserializer must agree, and nothing in Apache Kafka checks that they do.</p>
+  <p>Schema Registry exists to put that agreement somewhere. It is worth saying precisely what it is: <strong>not part of Apache Kafka</strong>. The common one is Confluent's (source-available, community licence); Apicurio Registry and cloud equivalents such as AWS Glue Schema Registry fill the same role. It is a separate service with its own REST API that stores schemas — in Confluent's case, in a compacted Kafka topic, <code>_schemas</code>, the same trick as M4 and M7.</p>
+
+  <h2>The three formats</h2>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Avro</th><th>Protobuf</th><th>JSON Schema</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Encoding</strong></td><td>Binary, no field tags — <em>needs the writer's schema to decode</em></td><td>Binary, tagged by field number</td><td>Text JSON, validated against a schema</td></tr>
+      <tr><td><strong>Field identity</strong></td><td>Name, resolved writer → reader</td><td>Field <em>number</em>; names are cosmetic on the wire</td><td>Property name</td></tr>
+      <tr><td><strong>Evolution lever</strong></td><td>Defaults</td><td>Never reuse numbers; <code>reserved</code></td><td>Content model (<code>additionalProperties</code>)</td></tr>
+      <tr><td><strong>Size</strong></td><td>Smallest</td><td>Small</td><td>Largest; compresses well</td></tr>
+      <tr><td><strong>Natural fit</strong></td><td>Data pipelines, Connect, analytics</td><td>Services already on gRPC</td><td>Teams that need human-readable payloads</td></tr>
+    </tbody>
+  </table></div>
+  <p>Avro's defining property is the one that makes a registry mandatory rather than nice: the bytes do not carry field names or tags, so a reader cannot decode a record without the exact schema it was written with. It then <strong>resolves</strong> writer schema against its own reader schema — matching by name, filling missing fields from defaults, skipping unknown ones. Evolution in Avro is that resolution step.</p>
+
+  <h2>The wire format</h2>
+<pre>byte 0      magic byte, 0x0
+bytes 1-4   schema id, big-endian int    <span class="c">// global id in the registry</span>
+bytes 5..   [Protobuf only: message-index array, which message in the .proto]
+            the encoded payload</pre>
+  <p>The serializer registers (or looks up) the schema, gets an id, and prefixes it. The deserializer reads the id, fetches the schema once, caches it forever — ids are immutable — and decodes. Five bytes per record buys self-describing data without shipping the schema.</p>
+  <p>Two consequences people miss. The data is now <strong>coupled to the registry</strong>: a record whose id the registry cannot resolve is undecodable, so the registry is as critical as the brokers for anyone reading old data. And a consumer using a plain <code>StringDeserializer</code> on this topic sees five garbage bytes before every value — the most common first symptom of "someone switched this topic to Avro".</p>
+
+  <h2>Subjects, and what a subject is for</h2>
+  <p>A <strong>subject</strong> is the unit the registry versions and checks compatibility against. Which subject a schema lands in is decided by the client's naming strategy:</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Strategy</th><th>Subject</th><th>Means</th></tr></thead>
+    <tbody>
+      <tr><td><code>TopicNameStrategy</code> (default)</td><td><code>&lt;topic&gt;-value</code></td><td>One schema lineage per topic: every record on the topic is the same type</td></tr>
+      <tr><td><code>RecordNameStrategy</code></td><td>fully-qualified record name</td><td>Type evolves independently of topic; compatibility is checked across every topic using it</td></tr>
+      <tr><td><code>TopicRecordNameStrategy</code></td><td><code>&lt;topic&gt;-&lt;record&gt;</code></td><td>Several types per topic, each with its own lineage</td></tr>
+    </tbody>
+  </table></div>
+  <p>This is where a design choice from M1 comes back. Ordering exists only within a partition, so if <code>OrderCreated</code>, <code>OrderPaid</code> and <code>OrderShipped</code> must be seen in order for one order, they must share a topic and a key — which the default strategy forbids, because it allows one type per topic. The fixes are a record-name strategy, or a single envelope/union type (an Avro union or Protobuf <code>oneof</code>, with schema references) under the topic subject. Choosing the topic layout by event ordering and then discovering the registry fights it is a classic sequence.</p>
+
+  <h2>Compatibility modes, and who upgrades first</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Mode</th><th>Guarantees</th><th>Deploy order</th><th>Avro rule of thumb</th></tr></thead>
+    <tbody>
+      <tr><td><code>BACKWARD</code> (default)</td><td>New schema can read data written with the previous one</td><td><strong>Consumers first</strong></td><td>Add fields with defaults; delete fields</td></tr>
+      <tr><td><code>FORWARD</code></td><td>Previous schema can read data written with the new one</td><td><strong>Producers first</strong></td><td>Add fields; delete only fields with defaults</td></tr>
+      <tr><td><code>FULL</code></td><td>Both</td><td>Either order</td><td>Add or delete only fields with defaults</td></tr>
+      <tr><td><code>*_TRANSITIVE</code></td><td>Same, against <em>every</em> earlier version</td><td>As above</td><td>As above</td></tr>
+      <tr><td><code>NONE</code></td><td>Nothing</td><td>Coordinated big-bang</td><td>Anything — and anything breaks</td></tr>
+    </tbody>
+  </table></div>
+  <p>The mode is a statement about <strong>deploy order</strong>, not about schemas. <code>BACKWARD</code> says the new reader handles old data, so readers must be upgraded before any writer produces the new shape. Most teams pick it as a default and then deploy the producer first, which is exactly the order it does not protect.</p>
+
+  <div class="callout warn">
+    <span class="tag">Why non-transitive is a trap on Kafka specifically</span>
+    <p>Non-transitive modes check the new schema against the <em>latest</em> version only. v3 can be compatible with v2, and v2 with v1, while v3 cannot read v1. On a queue that would not matter. On Kafka it does: retention keeps v1 records on disk, compacted topics keep them forever (M2), and a new consumer group with <code>auto.offset.reset=earliest</code> or any replay reads them. If topics are replayed, the honest mode is <code>BACKWARD_TRANSITIVE</code> or <code>FULL_TRANSITIVE</code>.</p>
+  </div>
+
+  <h3>Safe and breaking, per format</h3>
+  <ul>
+    <li><strong>Avro</strong> — the default is the whole game. Adding a field without one is breaking under <code>BACKWARD</code>: the new reader has nothing to fill it with from old data. Renames are breaking unless an <code>aliases</code> entry maps the old name. Changing a type is breaking except for Avro's defined promotions (e.g. <code>int</code> → <code>long</code>).</li>
+    <li><strong>Protobuf</strong> — field numbers are identity. Renaming a field is safe on the wire (it breaks JSON mappings and generated code, which is not nothing); reusing a number is silent corruption, which is why deleted fields should be marked <code>reserved</code>. In proto3 an absent field decodes as its zero value, so "not sent" and "sent as 0" are indistinguishable unless the field is declared <code>optional</code>.</li>
+    <li><strong>JSON Schema</strong> — the pitfall is the content model. In an <em>open</em> model (<code>additionalProperties</code> unset, i.e. true) the old schema already permitted any extra property of any type, so the checker cannot prove old data matches a newly declared property — adding a field can be rejected. In a <em>closed</em> model the reverse problems appear. The rules are not the Avro intuitions; check them rather than assume them.</li>
+  </ul>
+
+  <h2>Why the broker does not validate</h2>
+  <p>Apache Kafka brokers never parse payloads, and adding it would cost the zero-copy path and couple every broker to every schema. So enforcement is client-side and therefore <strong>optional</strong>: any producer with a plain <code>ByteArraySerializer</code> can write anything to any topic it is allowed to write to. Confluent Server adds per-topic broker-side schema-id validation (<code>confluent.value.schema.validation</code>), which checks that the id is registered for the subject — not that the payload actually decodes. Elsewhere, ACLs on who can produce (M11) are the real enforcement.</p>
+  <p>Two client settings matter more than anything above. <code>auto.register.schemas</code> defaults to true, which means a producer deploy <em>is</em> a schema change, made by whatever code happened to compile. In production, set it to false, register schemas from CI where the compatibility check fails the build, and have producers use the registered version (<code>use.latest.version</code>). The registry's compatibility check is only a gate if something cannot route around it.</p>
+
+  <h2>When a record will not deserialize</h2>
+  <p>This is M6's poison pill with a cause attached. Deserialization happens inside <code>poll()</code>, so a record that cannot be decoded — unknown schema id, a writer that bypassed the serializer, an incompatible change — fails <em>before</em> your code sees it. The Java consumer throws a <code>RecordDeserializationException</code> carrying the partition and offset; if nothing catches it the consumer retries the same offset forever, and that partition's lag climbs while every other partition looks healthy.</p>
+  <ul>
+    <li>Catch it, <code>seek()</code> past the offset, and send the raw bytes to a dead-letter topic with headers saying why. Frameworks package this (Spring's <code>ErrorHandlingDeserializer</code>, Connect's <code>errors.tolerance</code> with a DLQ).</li>
+    <li>Skipping is a decision to lose a record. It belongs in a DLQ that someone owns and replays, not in a log line.</li>
+    <li>Keys deserve extra care: changing how a key is serialized changes its bytes, which changes its partition (M1) and its compaction identity (M2). A key schema change is a repartition in disguise.</li>
+  </ul>
+
+  <h2>Contracts and ownership</h2>
+  <p>A topic with a schema is a published API, and the same rules apply: one owning team, a review process for changes, deprecation instead of deletion. The schemas belong in version control next to the producer, checked against the registry in CI. And soft-deleting a schema version in the registry does not delete the data written with it — hard-deleting one makes those records undecodable. Treat schema deletion like deleting a database column that still has rows.</p>
+  <p>This is also where M7's outbox pays off twice: the outbox row is the event's contract, written and reviewed alongside the business change, rather than an afterthought serialized in a message-publishing helper.</p>
+
+  <div class="callout">
+    <span class="tag">Answering "how do you evolve event schemas safely?"</span>
+    <p>Kafka itself is schema-agnostic, so the contract is enforced by clients through a registry — Confluent's or Apicurio, not Apache Kafka — which prefixes each record with a schema id and rejects incompatible changes per subject. The compatibility mode is really a deploy-order decision: <code>BACKWARD</code> means consumers upgrade first, <code>FORWARD</code> producers first, <code>FULL</code> either. Because Kafka retains and replays old data, I'd use the transitive variants, register schemas from CI with auto-registration off, and know the format's rules — Avro defaults, Protobuf's never-reuse-a-field-number, JSON Schema's content model. And I'd plan for the record that still fails: catch the deserialization error, dead-letter it, and keep the partition moving.</p>
+  </div>
+
+    <h2 id="q-m8">Interview questions — module 8</h2>
+  <p>Tick what you can answer fluently. The senior tier gets written out and graded; every question also appears in <a href="https://github.com/sorenhoang/sr-kafka-deepdive/blob/main/QUIZ.md">QUIZ.md</a> with a collapsed answer.</p>
+  <ul class="qlist" data-store="m8-questions">
+    <li><label><input type="checkbox" data-q="1"><span class="qtext"><span class="lvl">Junior</span>Why does Kafka need a schema registry at all, and is it part of Apache Kafka?</span></label></li>
+    <li><label><input type="checkbox" data-q="2"><span class="qtext"><span class="lvl">Junior</span>What does a record look like on the wire when it uses the Confluent serializers?</span></label></li>
+    <li><label><input type="checkbox" data-q="3"><span class="qtext"><span class="lvl">Junior</span>Name the compatibility modes and the default.</span></label></li>
+    <li><label><input type="checkbox" data-q="4"><span class="qtext"><span class="lvl">Mid</span>Which side must deploy first under BACKWARD, and under FORWARD? Why?</span></label></li>
+    <li><label><input type="checkbox" data-q="5"><span class="qtext"><span class="lvl">Mid</span>Give a safe and a breaking change for Avro and for Protobuf.</span></label></li>
+    <li><label><input type="checkbox" data-q="6"><span class="qtext"><span class="lvl">Mid</span>What are subject naming strategies, and when does the default become a problem?</span></label></li>
+    <li><label><input type="checkbox" data-q="7"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Why is non-transitive compatibility a trap on Kafka in particular, and which mode would you choose?</span></label></li>
+    <li><label><input type="checkbox" data-q="8"><span class="qtext"><span class="lvl hard">Senior · write it out</span>One partition of a consumer group has lag climbing steadily while all the others are at zero, and the consumer logs repeat the same error. Diagnose it.</span></label></li>
+    <li><label><input type="checkbox" data-q="9"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Your team wants to change the type of the message key from a string customer id to a structured Avro record. What do you say?</span></label></li>
+    <li><label><input type="checkbox" data-q="10"><span class="qtext"><span class="lvl hard">Senior · write it out</span>Avro, Protobuf or JSON Schema for a company's event platform — how do you decide, and what do you enforce regardless?</span></label></li>
+  </ul>
+  <p class="qmeta" data-count-for="m8-questions">0 / 10</p>
 
 
   <h2 id="a-m0">Model answers — module 0</h2>

@@ -787,3 +787,102 @@ An application that writes to its database and publishes to Kafka is writing to 
 Flat lag with no errors on a `read_committed` consumer points first at a **hanging transaction**: a producer began a transaction, wrote to these partitions, and died or stalled without committing or aborting. The consumer is pinned at the **Last Stable Offset** and cannot advance past the first record of that open transaction — by design, not by failure, which is why nothing is logging an error. Confirm by comparing the LSO against the high watermark on those partitions, and check `__transaction_state` and the transactional producers for one that is stuck. Expect it to resolve itself when `transaction.timeout.ms` expires (60 s by default), so lag that is flat for *minutes* means either a long broker-side `transaction.max.timeout.ms` (up to 15 minutes) or a producer that keeps the transaction alive without completing it. Things to rule out: a `read_uncommitted` consumer on the same partitions still progressing confirms the data is there and the LSO is the cause; and remember that control records and aborted records occupy offsets, so a fully consumed transactional topic can show small non-zero lag normally — flat-and-large is the signal, not non-zero. Longer term this is the argument for short transactions, since every open one is a lower bound on downstream latency. Kafka 4.0 enables transaction version 2 (KIP-890) by default, which bumps the producer epoch per transaction and moves partition registration into a single server-side call, tightening several of the races that produced hanging transactions.
 
 </details>
+
+
+## M8 · Schemas, the registry & evolution
+
+### Junior
+
+**M8.1** — Why does Kafka need a schema registry at all, and is it part of Apache Kafka?
+
+<details>
+<summary>Answer</summary>
+
+Brokers store keys and values as opaque bytes and never parse them, so nothing in Kafka checks that producers and consumers agree on what those bytes mean. A registry puts the contract somewhere: it stores versioned schemas, hands out ids, and rejects incompatible changes. It is **not** part of Apache Kafka — the common one is Confluent's Schema Registry, with Apicurio and cloud equivalents such as AWS Glue Schema Registry as alternatives. Confluent's stores its schemas in a compacted Kafka topic, `_schemas`.
+
+</details>
+
+**M8.2** — What does a record look like on the wire when it uses the Confluent serializers?
+
+<details>
+<summary>Answer</summary>
+
+A magic byte `0x0`, then a 4-byte big-endian **schema id**, then the encoded payload — with Protobuf adding a small message-index array after the id to say which message in the `.proto` file it is. The deserializer reads the id, fetches the schema from the registry once and caches it (ids are immutable), then decodes. A consumer using a plain string deserializer sees five garbage bytes before each value, which is the usual first sign a topic was switched to a registry format.
+
+</details>
+
+**M8.3** — Name the compatibility modes and the default.
+
+<details>
+<summary>Answer</summary>
+
+`BACKWARD` (the default) — the new schema can read data written with the previous one. `FORWARD` — the previous schema can read data written with the new one. `FULL` — both. Each has a `_TRANSITIVE` variant that checks against every earlier version rather than only the latest. `NONE` disables checking.
+
+</details>
+
+### Mid
+
+**M8.4** — Which side must deploy first under BACKWARD, and under FORWARD? Why?
+
+<details>
+<summary>Answer</summary>
+
+Under **BACKWARD**, consumers first: the guarantee is that the new reader schema handles data written with the old one, so readers must be on the new schema before any writer produces the new shape. Under **FORWARD**, producers first: old readers are guaranteed to handle new data, so writers can move ahead. Under **FULL**, either order. The mode is really a statement about deploy order — and the common mistake is choosing `BACKWARD` because it is the default and then shipping the producer first, the one order it does not protect.
+
+</details>
+
+**M8.5** — Give a safe and a breaking change for Avro and for Protobuf.
+
+<details>
+<summary>Answer</summary>
+
+**Avro:** adding a field *with a default* is safe under `BACKWARD` — the new reader fills it from the default when reading old data. Adding one without a default is breaking, as is renaming without an `aliases` entry or changing a type outside Avro's defined promotions (e.g. `int` → `long` is allowed). **Protobuf:** fields are identified by number, so renaming a field or adding a new numbered field is wire-safe. Reusing a deleted field's number is the breaking change — and a silent one, since old data decodes into the wrong field — which is why deleted numbers should be marked `reserved`. Changing a field's type is generally breaking. Also worth knowing: in proto3 an absent field decodes as its zero value, so 'not sent' and 'sent as 0' are indistinguishable unless the field is `optional`.
+
+</details>
+
+**M8.6** — What are subject naming strategies, and when does the default become a problem?
+
+<details>
+<summary>Answer</summary>
+
+The subject is the unit the registry versions and checks compatibility against. `TopicNameStrategy` (default) uses `<topic>-value`, so a topic has one schema lineage and therefore one record type. `RecordNameStrategy` uses the fully-qualified record name, so a type evolves independently of topics. `TopicRecordNameStrategy` uses `<topic>-<record>`, allowing several types per topic each with its own lineage. The default becomes a problem when several event types must share a topic to keep their order — `OrderCreated`, `OrderPaid`, `OrderShipped` for one order need one topic and one key, because ordering is per partition. The fix is a record-name strategy, or a single union/`oneof` envelope type with schema references under the topic subject.
+
+</details>
+
+### Senior
+
+**M8.7** — Why is non-transitive compatibility a trap on Kafka in particular, and which mode would you choose?
+
+<details>
+<summary>Answer</summary>
+
+Non-transitive modes check a new schema only against the **latest** version. v3 can be compatible with v2 and v2 with v1 while v3 cannot read v1 at all — compatibility is not transitive. On a queue that deletes on consume, nobody reads v1 data after v2 ships, so it would not matter. Kafka is a log: time-based retention keeps v1 records on disk for days, **compacted topics keep the latest value per key forever**, and new consumer groups starting from `earliest`, replays after a bug, and reprocessing all read them. So the first time a new service bootstraps from the beginning of a compacted topic, it hits records its schema cannot read — long after the change that caused it was approved by the registry. I would default to `BACKWARD_TRANSITIVE` for topics consumers own the upgrade on, or `FULL_TRANSITIVE` for widely shared topics where producers and consumers deploy independently and you cannot control the order. The cost is that it constrains evolution harder — you can never drop a default you once relied on — which is the right price for data that outlives the code that wrote it. If a genuinely breaking change is needed, it should be a new topic (or a new subject plus a migration) rather than `NONE` on the existing one.
+
+</details>
+
+**M8.8** — One partition of a consumer group has lag climbing steadily while all the others are at zero, and the consumer logs repeat the same error. Diagnose it.
+
+<details>
+<summary>Answer</summary>
+
+One partition stuck with the others healthy, plus a repeating error, is a **poison pill** (M6) — and with a registry in play the most likely cause is a record that cannot be deserialized. Deserialization happens inside `poll()`, so it fails before application code runs; the Java consumer throws `RecordDeserializationException` with the partition and offset, and if nothing handles it the consumer retries the same offset forever. The other partitions keep moving, so overall throughput looks fine and only that partition's lag tells the story. Confirm by reading the error's offset and pulling the raw bytes at it: is the first byte `0x0`? Does the schema id resolve in the registry? Typical causes: a producer that bypassed the serializer and wrote raw JSON or strings; a schema id from a different registry environment (a producer pointed at staging); an incompatible schema registered with compatibility `NONE` or auto-registration from a stray build; or a schema version hard-deleted from the registry, which makes every record written with it undecodable. Immediate fix: catch the exception, `seek()` past the offset, and publish the raw bytes plus partition, offset and error to a dead-letter topic — Spring's `ErrorHandlingDeserializer` or Connect's `errors.tolerance` with a DLQ do this for you. Skipping is a decision to lose data, so the DLQ must have an owner and a replay path. Longer term: turn off `auto.register.schemas`, register schemas from CI where an incompatible change fails the build, restrict who can produce to the topic with ACLs, and alert on per-partition lag rather than group totals — the aggregate hid this.
+
+</details>
+
+**M8.9** — Your team wants to change the type of the message key from a string customer id to a structured Avro record. What do you say?
+
+<details>
+<summary>Answer</summary>
+
+That it is not a schema change, it is a **repartitioning**, and it should be treated as a migration. The default partitioner hashes the key's serialized bytes, so changing how the key is serialized — even if it carries the same customer id — sends the same customer to a different partition. Ordering per customer is only guaranteed within a partition (M1), so during the switchover old and new events for one customer live in different partitions and can be consumed out of order. On a **compacted** topic it is worse: compaction keeps the latest value per key bytes (M2), so the old-format key and new-format key are different keys — the old value is never superseded, and readers see both. Stateful consumers keyed on the old form (Streams state stores, caches, joins) break too. The honest options are: keep the key as it is and put structure in the value, which is almost always right — keys should be small, stable and boring; or create a new topic with the new key, dual-write or migrate with a consumer that re-keys, move consumers over, then retire the old topic. Schema compatibility checks will not catch any of this, because a key subject can be perfectly 'compatible' while the bytes, and therefore the partitions, change.
+
+</details>
+
+**M8.10** — Avro, Protobuf or JSON Schema for a company's event platform — how do you decide, and what do you enforce regardless?
+
+<details>
+<summary>Answer</summary>
+
+The format matters less than the enforcement, so I would decide on fit and then spend the effort on the process. **Avro** is the default for data platforms: smallest encoding, the strongest evolution story via writer/reader schema resolution and defaults, and first-class support in Connect, Debezium and analytics tooling. Its cost is that payloads are undecodable without the registry, and code generation is weaker in some languages. **Protobuf** fits organisations already on gRPC: one IDL for RPC and events, excellent codegen, and evolution by field number that is easy to reason about — provided nobody reuses a number, and accepting that proto3 cannot distinguish an absent field from a zero value without `optional`. **JSON Schema** gives human-readable payloads and the lowest barrier for teams, at the cost of size, slower parsing, and compatibility rules around the open/closed content model that surprise people used to Avro. Mixing formats across topics is fine; mixing within a topic is not. What I would enforce regardless: schemas in version control next to the producing service; `auto.register.schemas=false` in production, with registration and the compatibility check in CI so an incompatible change fails a build rather than a consumer; transitive compatibility because Kafka replays old data; one owning team per topic, with deprecation rather than deletion and no hard-deleting schema versions that still have data; ACLs so only the owner can produce; and a dead-letter path for records that still fail. Schemas are where the outbox pattern (M7) pays off as well — the event shape is reviewed with the business change rather than invented in a publishing helper. The point to land: a registry turns schema compatibility from a hope into a gate, but only if nothing can route around it.
+
+</details>
