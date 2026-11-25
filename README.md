@@ -38,9 +38,18 @@ worth retrying in M13, alongside M0 Q9 and Q10.
 
 M3, M4 and M5: labs run, and all thirty questions answered from the model rather than
 attempted, so `model` rather than a tick. The quiz entries stay unchecked on purpose —
-the tracker records what has been defended, not what has been read. Thirty-four
-questions are now queued for a cold retry in M13: M0 Q9-Q10, M2 Q9-Q10, and all of
-M3, M4 and M5.
+the tracker records what has been defended, not what has been read.
+
+M6 through M13: material written and read, and no questions answered yet. From M7 the
+course is theory and depth by choice, so there is no lab to run — which makes the
+question columns the only measure of progress left, and they are empty. M11 (security)
+is flagged for a second pass.
+
+That leaves 114 questions queued for a cold retry in M13 — answered out loud, recorded,
+graded, no notes: M0 Q9-Q10, M2 Q9-Q10, the thirty from M3, M4 and M5 that were answered
+from the model, and all eighty from M6 through M13. The senior tiers of M3 and M7 are the
+place to start, because replication and transactions are where follow-up probes go
+deepest.
 
 | Module | Topic | Material | Lab run | Questions graded |
 |---|---|:--:|:--:|:--:|
